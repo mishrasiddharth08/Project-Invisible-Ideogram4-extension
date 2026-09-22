@@ -1,0 +1,27 @@
+Project Invisible — Ideogram 4 for Forge Neo
+Copyright 2026 Project Invisible contributors.
+Extension contributions are licensed under Apache License 2.0.
+
+Includes/adapts Ideogram 4 inference components from ideogram-oss/ideogram4,
+licensed under Apache License 2.0:
+https://github.com/ideogram-oss/ideogram4
+https://github.com/ideogram-oss/ideogram4/blob/main/LICENSE.md
+
+Qwen3-VL configuration/tokenizer assets are included for local tokenization.
+Source: https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct
+Upstream lists Apache-2.0; the license text is included in LICENSE.
+Their upstream notices continue to apply. Transformers, PyTorch,
+Forge, bitsandbytes and attention/quantization kernels are external dependencies,
+not relicensed or bundled by this extension.
+
+Acceleration concepts were reviewed against Comfy-WaveSpeed (First Block Cache)
+and ComfyUI Spectrum implementations. The added First Block Cache bridge is an
+independent engine-local implementation; no ComfyUI node code is imported.
+
+Modified inference files include pipeline.py and modeling_ideogram4.py:
+compact text-feature capture, unconditional fast path, scoped acceleration,
+host attention delegation, loading/lifecycle safeguards and block streaming.
+See CHANGELOG.md.
+
+No model weights, adapters, API credentials or personal config are distributed.
+Those assets retain their separate licenses; Apache-2.0 here covers code only.

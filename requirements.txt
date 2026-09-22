@@ -1,0 +1,4 @@
+# PROJECT INVISIBLE - Ideogram 4 for Forge Neo (sd-webui-forge-classic, branch: neo)
+# All heavy requirements are already inside the Forge venv (torch, transformers, safetensors, einops, huggingface_hub).
+# requirements.txt stays intentionally EMPTY of heavy deps: nothing new is installed into the Forge venv by this extension.
+# Do NOT add torch/transformers/diffusers here - they must come from Forge itself (one process, Forge venv only).

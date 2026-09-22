@@ -1,0 +1,2 @@
+# Preserve release hashes across Windows/Linux Git checkouts.
+* -text

@@ -1,0 +1,27 @@
+# Local settings and credentials
+/config.json
+/config.json.*
+.env
+.env.*
+*.key
+*.pem
+# Models, outputs and caches
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.gguf
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.log
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.update-backups/
+boogu-runtime/
+tests/_out*/
+tests/_probe*/
+# Keep bundled tokenizer/config JSON; these are NOT the root local config.

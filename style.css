@@ -1,0 +1,48 @@
+/* Scope every rule to this engine; no Forge prompt or global theme changes. */
+.pi-i4-panel {
+  border: 1px solid var(--border-color-primary, #7776) !important;
+  border-radius: 12px !important;
+}
+.pi-i4-panel > .label-wrap {
+  padding: 12px 16px !important;
+}
+.pi-i4-panel .pi-i4-recipe {
+  align-items: center;
+  gap: 16px;
+  padding: 8px 0;
+}
+.pi-i4-panel .prose {
+  font-size: 0.93rem;
+  line-height: 1.55;
+}
+.pi-i4-panel .prose code {
+  overflow-wrap: anywhere;
+}
+.pi-i4-panel .pi-i4-tools > .tab-nav {
+  flex-wrap: wrap;
+  gap: 4px;
+  padding-block: 6px;
+}
+.pi-i4-panel .pi-i4-status {
+  border-left: 3px solid var(--color-accent, #d97706);
+  padding: 8px 12px;
+  background: var(--background-fill-secondary, transparent);
+  border-radius: 4px;
+}
+/* Blend real sampling previews; final gallery image remains untouched. */
+.pi-i4-developing .livePreview > img:last-child {
+  animation: pi-i4-reveal 450ms ease-out both;
+}
+@keyframes pi-i4-reveal {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pi-i4-developing .livePreview > img:last-child { animation: none; }
+}
+@media (max-width: 700px) {
+  .pi-i4-panel .pi-i4-recipe {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
