@@ -106,4 +106,8 @@ Extension code: [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for Ideogram
 inference components, Qwen tokenizer assets and acknowledgments. Models and
 upstream projects retain their own licenses.
 
-Thanks to Forge Neo, Ideogram, Qwen and the wider open-source communities.
+## Special thanks
+
+Special thanks to [u/malcolmrey and the r/malcolmrey community](https://www.reddit.com/r/malcolmrey/) and the [r/SECourses community](https://www.reddit.com/r/SECourses/) for support and inspiration.
+
+Thank you to the Forge Neo, Diffusers, Qwen, DeGrid, Spectrum and wider open-source communities.
