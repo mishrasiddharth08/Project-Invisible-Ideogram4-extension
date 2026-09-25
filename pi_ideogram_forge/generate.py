@@ -1131,7 +1131,6 @@ def _run_sampling(
                 # our preview cadence mid-generation. We publish current_image
                 # directly, so we owe Forge nothing here but an id bump.
                 _preview_tick = [0]
-                _preview_next = [0.0]
 
                 def _preview(z_latent):
                     if not _FORGE_OK or not _PREVIEW_ON:
@@ -1139,19 +1138,26 @@ def _run_sampling(
                     _preview_tick[0] += 1
                     if _preview_tick[0] % _PREVIEW_EVERY != 0:
                         return
-                    if time.monotonic() < _preview_next[0]:
-                        return
                     try:
-                        img = pipe.decode_preview(z_latent, preview_pixels=256)
+                        # LINEAR PROGRESS: preview on EVERY scheduled step (the
+                        # old 1.0 s wall-clock throttle skipped steps, so the
+                        # image and bar jumped instead of advancing one notch
+                        # per step). Forge's show_progress_every_n_steps still
+                        # controls the cadence via _PREVIEW_EVERY above.
+                        #
+                        # COMPLETE PICTURE AT THE LAST STEP: built-in models
+                        # show the finished image the moment sampling ends, not
+                        # a thumbnail that lingers until the decode phase. On
+                        # the final step we decode the preview at full canvas
+                        # size, so the last preview IS the final image.
+                        _last = shared.state.sampling_step >= max(1, image_actual_steps[0])
+                        _px = max(width, height) if _last else 256
+                        img = pipe.decode_preview(z_latent, preview_pixels=_px)
                         if img is not None:
                             shared.state.current_image = img
                             shared.state.id_live_preview += 1
                     except Exception:
                         pass
-
-                    # Throttle from completion, so a costly VAE preview cannot
-                    # immediately trigger another and starve actual sampling.
-                    _preview_next[0] = time.monotonic() + 1.0
 
                 try:
                     if gray_steps is not None:
