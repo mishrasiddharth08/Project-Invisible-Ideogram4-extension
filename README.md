@@ -2,7 +2,7 @@
 
 **Ideogram 4 in Forge's familiar workflow. No separate generation tab or extra Python environment.**
 
-[Installation](#beginner-installation) · [Models](#model-files) · [Update safety](UPDATE_SAFETY.md) · [Technical notes](docs/TECHNICAL.md)
+[Installation](#beginner-installation) · [Models](#model-files) · [Step-by-step usage](#step-by-step-usage) · [UI tour](#ui-tour) · [Update safety](UPDATE_SAFETY.md) · [Technical notes](docs/TECHNICAL.md)
 
 ## The Project Invisible idea
 
@@ -52,6 +52,37 @@ Existing subfolders are searched. Do not substitute an unrelated encoder or VAE.
 An explicitly selected compatible unconditional replacement adapter can replace
 the separate guidance model. Gray requires a manual creator download.
 Review original licenses before downloading. Generate never silently fetches weights.
+
+## UI tour
+
+Everything lives inside Forge's normal txt2img / img2img view. The extension adds a single collapsed **Ideogram 4** accordion:
+
+![Ideogram 4 panel layout](docs/img/ui-tour.svg)
+
+Inside the panel:
+
+- **Generation recipe row** — pick a named preset for the official recipe. Recipes own their CFG schedule (and step count for distilled ones); Forge's sampler/scheduler selectors do not apply here. Forge's own size, seed, batch and Steps controls stay in charge.
+- **Style tab** — choose a style or character adapter; combine more with `<lora:name:strength>` in your prompt.
+- **Filter bypass tab** — adapter controls with one-click helper buttons (*Use Gray starting point*, *Gray + guidance LoRA (1.0)*, *Turn off*, *Refresh adapters*).
+- **Performance tab** — offloading, Spectrum/First Block Cache and other speed/memory options.
+- **Model Setup tab** — source links, compatible variants and optional selected-file downloads for every required weight.
+- **Status strip** — model detection, adapter hints and memory state, highlighted at the left edge of the panel.
+
+## Step-by-step usage
+
+![Step-by-step first generation](docs/img/usage-steps.svg)
+
+1. **Install** — stop Forge, download the ZIP, rename the folder to `project-invisible-ideogram-4` and place it in `extensions/` (no double nesting).
+2. **Model files** — open the **Model Setup** tab and follow the printed links; download weights manually into the Forge folders listed below.
+3. **Select preset + checkpoint** — pick **ideogram4** in the preset selector and your conditional checkpoint in the checkpoint selector.
+4. **Configure (optional)** — expand the Ideogram 4 panel. For the first run keep **Balanced**, batch **1** and a modest image size. Style, Filter bypass and Performance are all optional; the defaults just work.
+5. **Generate** — press Forge's normal **Generate** button. Two progress bars track the current image and the overall batch; evolving previews appear while sampling and the final image lands in the gallery after VAE decoding.
+
+### Using an existing image (img2img)
+
+![img2img flow](docs/img/img2img-flow.svg)
+
+Use Forge's normal **img2img** tab with its upload and denoising controls. Lower strength preserves more of the source; zero preserves the resized source; one starts from noise. **Inpainting/masks, latent-only resizing and native instruction editing are unsupported.**
 
 ## First generation
 
