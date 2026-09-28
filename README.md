@@ -137,7 +137,14 @@ Extension code: [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for Ideogram
 inference components, Qwen tokenizer assets and acknowledgments. Models and
 upstream projects retain their own licenses.
 
-## Special thanks
+## Special Thanks
+
+- [**r/sdforall**](https://www.reddit.com/r/sdforall/) - community discussion and testing
+- [**r/SECourses**](https://www.reddit.com/r/SECourses/) - community discussion and testing
+- [**r/malcolmrey**](https://www.reddit.com/r/malcolmrey/) - community discussion and testing
+- [**Haoming02 / sd-webui-forge-classic (neo branch)**](https://github.com/Haoming02/sd-webui-forge-classic/tree/neo) - the Forge Neo tree this extension targets
+- [**ComfyUI**](https://github.com/comfyanonymous/ComfyUI) - reference for upstream sampler/scheduler coverage
+- The **Forge / AUTOMATIC1111 community** - for the extension ecosystem this plugs into
 
 Special thanks to [u/malcolmrey and the r/malcolmrey community](https://www.reddit.com/r/malcolmrey/) and the [r/SECourses community](https://www.reddit.com/r/SECourses/) for support and inspiration.
 
