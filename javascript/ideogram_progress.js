@@ -10,7 +10,7 @@ onUiLoaded(function () {
             if (gallery) gallery.classList.remove('pi-i4-developing');
         }
         function progress(res) {
-            const match = /^Ideogram 4 \| Image (\d+)\/(\d+) \| Step (\d+)\/(\d+)$/.exec(res.textinfo || '');
+            const match = /^Ideogram 4 \| Image (\d+)\/(\d+) \| Step (\d+)\/(\d+)(?: \| (.+))?$/.exec(res.textinfo || '');
             if (match && res.active) {
                 if (gallery) gallery.classList.add('pi-i4-developing');
                 if (!current) {
@@ -28,7 +28,7 @@ onUiLoaded(function () {
                 current.setAttribute('aria-valuenow', String(pct));
                 current.firstChild.style.width = pct + '%';
                 current.firstChild.style.transition = 'width 0.35s ease';
-                current.firstChild.textContent = `Current image ${match[1]}/${match[2]}: ${Math.round(pct)}%`;
+                current.firstChild.textContent = `Current image ${match[1]}/${match[2]}: ${Math.round(pct)}%${match[5] ? ' · ' + match[5] : ''}`;
                 const overall = [...container.parentNode.children].find(el => el !== current && el.classList.contains('progressDiv'));
                 if (overall && overall.firstChild) {
                     overall.firstChild.textContent = `Overall: ${Math.round((res.progress || 0) * 100)}%`;

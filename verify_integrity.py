@@ -5,7 +5,7 @@ from pathlib import Path
 
 SOURCE_DIRS = ('scripts', 'javascript', 'pi_ideogram_assets', 'pi_ideogram_forge',
                'pi_ideogram_lib', 'pi_ideogram_lora', 'docs', '.github', 'tests')
-SOURCE_EXTENSIONS = {'.py', '.js', '.cjs', '.css', '.json', '.txt', '.md', '.yml', '.yaml'}
+SOURCE_EXTENSIONS = {'.py', '.js', '.cjs', '.css', '.json', '.txt', '.md', '.yml', '.yaml', '.svg'}
 
 
 def source_files(root):

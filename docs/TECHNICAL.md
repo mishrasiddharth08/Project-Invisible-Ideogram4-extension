@@ -1,4 +1,8 @@
-# Project Invisible — Ideogram 4 for Forge Neo
+# Historical technical notes — Ideogram 4
+
+These notes describe the previous panel and private acceleration design. Current
+controls, supported settings and acceptance status are in [INTEGRATION_STATUS.md](INTEGRATION_STATUS.md).
+There is now no extension accordion and no private Spectrum implementation.
 
 An engine-scoped Ideogram 4 extension: the normal Forge checkpoint selector, prompt box, Generate button and output folders. No second WebUI or environment.
 

@@ -94,6 +94,8 @@ def _resolve_preset(opts: dict, p) -> tuple[int, tuple[float, ...], float, float
     """
     from pi_ideogram_lib.sampler_configs import (
         DISTILL_PRESETS, PRESETS, build_custom_schedule)
+    if getattr(p, '_pi_refining', False):
+        return _resolve_sampling(p)
     preset = str(opts.get("preset", "Auto") or "Auto")
     if preset == "TurboTime-4":
         # Ostris TurboTime: 2-8 steps, DEFAULT 4. The stock steps slider only
@@ -658,22 +660,10 @@ def generate(
     debanner_on = opts.get("debanner_enabled", True)
     debanner_str = float(opts.get("debanner_strength", 0.6))
 
-    # --- SPECTRUM (opt-in step forecasting) ------------------------------------
-    # OFF unless config.json says otherwise. It trades exactness for speed:
-    # forecast steps skip the transformer, so the same seed gives a slightly
-    # different image. That is not a setting to turn on for someone.
-    from pi_ideogram_lib.spectrum import SpectrumConfig
-    spectrum_cfg = SpectrumConfig(
-        enabled=bool(opts.get("spectrum_enabled", False)),
-        degree=int(opts.get("spectrum_degree", 1)),
-        ridge=float(opts.get("spectrum_ridge", 0.1)),
-        history=int(opts.get("spectrum_history", 6)),
-        warmup=int(opts.get("spectrum_warmup", 4)),
-        tail=int(opts.get("spectrum_tail", 2)),
-        stride=int(opts.get("spectrum_stride", 3)),
-        blend=float(opts.get("spectrum_blend", 1.0)),
-        max_growth=float(opts.get("spectrum_max_growth", 2.0)),
-    ).sanitised()
+    # Acceleration belongs to Forge. Never use a private Spectrum implementation.
+    native_spectrum = opts.get("native_spectrum")
+    if opts.get("spectrum_enabled", False):
+        print(f"{TAG} Legacy Spectrum setting disabled; only Forge built-in Spectrum is permitted.")
 
     # --- FILTER BYPASS recipe (spec P1-P7) -------------------------------------
     from pi_ideogram_lib.bypass import log_line, recipe as bypass_recipe
@@ -747,8 +737,7 @@ def generate(
     # when it was active, so an ordinary log could not distinguish "off",
     # "on but every step declined" and "wired up wrong and silently dead" -
     # and it shipped in the third state. Absence of a line is not evidence.
-    _spx = ("ON (" + f"stride {spectrum_cfg.stride}, degree {spectrum_cfg.degree}"
-            + ", approximate)") if spectrum_cfg.enabled else "OFF"
+    _spx = "Forge built-in enabled" if native_spectrum is not None else "OFF"
     _bypass_configured = bool(r['enabled'] or (bypass_lora_path is not None and bypass_lora_strength))
     print(f"{TAG} filter bypass: {'ON' if _bypass_configured else 'OFF'} | "
           f"debanner: {'ON (' + str(debanner_str) + ')' if debanner_on else 'OFF'} | "
@@ -773,7 +762,7 @@ def generate(
             preset_name, quant_label, loras, r, bypass_lora_path, bypass_lora_strength,
             want_uncond, turbo, debanner_on, debanner_str, mode, cond_path,
             turbo_merge_ok=turbo_merge_ok, distilled=distilled,
-            spectrum_cfg=spectrum_cfg,
+            native_spectrum=native_spectrum,
             first_block_cache=0.08 if opts.get('first_block_cache_enabled', False) else 0.0,
             _FORGE_OK=_FORGE_OK, shared=shared, Processed=Processed, forge_images=forge_images,
             lora_logs=lora_logs, active_loras=active_loras,
@@ -789,7 +778,7 @@ def _run_sampling(
     p, pipe, caption_str, width, height, num_steps, guidance_schedule, mu, std,
     preset_name, quant_label, loras, r, bypass_lora_path, bypass_lora_strength,
     want_uncond, turbo, debanner_on, debanner_str, mode, cond_path,
-    *, turbo_merge_ok=False, distilled=False, spectrum_cfg=None, first_block_cache=0.0,
+    *, turbo_merge_ok=False, distilled=False, native_spectrum=None, first_block_cache=0.0,
     _FORGE_OK, shared, Processed, forge_images, lora_logs, active_loras,
     init_images=None, denoising_strength=0.75, resize_mode=0,
 ):
@@ -1053,7 +1042,7 @@ def _run_sampling(
                         publish_start(shared.state, width, height)
                     shared.state.sampling_step = 0
                     shared.state.textinfo = (
-                        f"Ideogram 4 | Image {output_index + 1}/{total} | Step 0/{actual_steps}")
+                        f"Ideogram 4 | Image {output_index + 1}/{total} | Step 0/{actual_steps} | Preparing: gradient placeholder")
 
                 # RESET THE PER-IMAGE BAR. It is created once, outside this
                 # loop, so without this its elapsed clock keeps running across
@@ -1095,6 +1084,12 @@ def _run_sampling(
                 def _on_actual_steps(actual):
                     actual = int(actual)
                     image_actual_steps[0] = actual
+                    if getattr(p, '_pi_refining', False):
+                        p.extra_generation_params.update({
+                            'Ideogram 4 refiner steps': actual,
+                            'Ideogram 4 refiner guidance': str(tuple(sorted(set(guidance_schedule)))),
+                            'Ideogram 4 refiner recipe': preset_name,
+                        })
                     if bar is not None:
                         try:
                             bar.reset(total=actual)
@@ -1108,6 +1103,12 @@ def _run_sampling(
                             pass
 
                 # PREVIEW CADENCE - Forge's own settings, which this ignored.
+                def _phase(name):
+                    if _FORGE_OK:
+                        shared.state.textinfo = (
+                            f"Ideogram 4 | Image {output_index + 1}/{total} | "
+                            f"Step {shared.state.sampling_step}/{image_actual_steps[0]} | {name}")
+
                 # Someone who turned live previews OFF still paid for them, and
                 # `actual_steps // 8` means EVERY step at 12 steps or fewer.
                 # Measured at 1280x1728: 35-39 s per generation, ~27% of the run.
@@ -1154,8 +1155,8 @@ def _run_sampling(
                         _px = max(width, height) if _last else 256
                         img = pipe.decode_preview(z_latent, preview_pixels=_px)
                         if img is not None:
-                            shared.state.current_image = img
-                            shared.state.id_live_preview += 1
+                            from .preview import publish_frame
+                            publish_frame(shared.state, img)
                     except Exception:
                         pass
 
@@ -1170,19 +1171,21 @@ def _run_sampling(
                             init_image=forge_images.resize_image(
                                 resize_mode, source, width, height),
                             strength=denoising_strength,
+                            fixed_img2img_steps=bool(getattr(p, '_pi_refining', False)),
                         )
                     imgs = pipe(
                         caption_str, height=height, width=width, num_steps=num_steps,
                         guidance_schedule=guidance_schedule, mu=mu, std=std, seed=seed,
                         raise_on_caption_issues=False, step_callback=cb,
                         preview_callback=_preview,
+                        phase_callback=_phase,
                         on_actual_steps=_on_actual_steps,
                         filter_bypass=r["enabled"],
                         bypass_extra_steps=0,
                         sigma_smooth_steps=extra_steps,
                         first_step_undo=first_step_undo,
                         debanner_enabled=debanner_on, debanner_strength=debanner_str,
-                        spectrum=spectrum_cfg,
+                        native_spectrum=native_spectrum,
                         first_block_cache=first_block_cache,
                         **pipeline_kwargs,
                     )
@@ -1217,6 +1220,19 @@ def _run_sampling(
                        f"Resize mode: {resize_mode}" if is_img2img else "")
                     + (f"\nLoRAs: {', '.join(n for n, _s, _p in loras)}" if loras else "")
                 )
+                if native_spectrum is not None:
+                    stats = getattr(pipe, '_native_spectrum_stats', None) or {}
+                    info += (f"\nSpectrum: Forge built-in | "
+                             f"real branch calls: {stats.get('real_calls', 0)} | "
+                             f"forecast branch calls: {stats.get('forecast_calls', 0)}")
+                    info += '\nSpectrum: Forge built-in, ' + ', '.join(
+                        f'spec_{key}: {value}' for key, value in native_spectrum.items())
+                    try:
+                        p.extra_generation_params['Spectrum'] = 'Forge built-in'
+                        for key, value in native_spectrum.items():
+                            p.extra_generation_params['spec_' + key] = value
+                    except Exception:
+                        pass
                 all_infotexts.append(info)
                 # SAVE NOW, not at the end of the batch. An image that has been
                 # decoded is finished work; holding it in a list until every
@@ -1224,6 +1240,7 @@ def _run_sampling(
                 # process kill loses all of them. Writing here also means the
                 # file is on disk before the NEXT image starts sampling.
                 if _FORGE_OK:
+                    _phase('Saving')
                     _saved_now = _save_images(p, imgs, [seed] * len(imgs),
                                               [str(p.prompt)] * len(imgs),
                                               [info] * len(imgs),

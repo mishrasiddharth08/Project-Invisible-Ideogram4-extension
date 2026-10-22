@@ -137,8 +137,6 @@ class Ideogram4MemoryManager:
 
         Returns GB freed (0.0 when unavailable). Never raises.
         """
-        from .memory_handoff import release_idle_qwen_worker
-        release_idle_qwen_worker()
         if not torch.cuda.is_available():
             return 0.0
         try:

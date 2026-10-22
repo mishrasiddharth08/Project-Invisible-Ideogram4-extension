@@ -55,7 +55,6 @@ from .quantized_loading import (
 from .memory import HIGH_VRAM_THRESHOLD_GB, Ideogram4MemoryManager
 from .meta_init import assert_rope_buffers_valid, reinit_rope_buffers
 from .scheduler import get_schedule_for_resolution, make_step_intervals
-from .spectrum import SpectrumConfig, VelocityForecaster, plan, summarise
 from .block_cache import generation_cache, set_step
 
 
@@ -631,6 +630,7 @@ class Ideogram4Pipeline:
     raise_on_caption_issues: bool = True,
     step_callback=None,
     preview_callback=None,
+    phase_callback=None,
     on_actual_steps=None,
     filter_bypass: bool = False,
     bypass_extra_steps: int = 0,
@@ -638,10 +638,12 @@ class Ideogram4Pipeline:
     first_step_undo=None,
     debanner_enabled: bool = False,
     debanner_strength: float = 0.6,
-    spectrum: "SpectrumConfig | None" = None,
+    spectrum=None,
+    native_spectrum=None,
     first_block_cache: float = 0.0,
     init_image: Image.Image | None = None,
     strength: float = 1.0,
+    fixed_img2img_steps: bool = False,
   ) -> list[Image.Image]:
     """Run the full Ideogram 4 generation pipeline.
 
@@ -670,14 +672,16 @@ class Ideogram4Pipeline:
       debanner_enabled: If True, apply MrJackSpade correction tensor
         on the first step to remove the Ideogram watermark.
       debanner_strength: Correction magnitude (0.0–1.5, default 0.6).
-      spectrum: Opt-in step forecasting (see spectrum.py). None or a config
-        with enabled=False runs the official recipe unchanged. When on,
-        some steps are extrapolated instead of computed, which is faster
-        and CHANGES the image for a given seed.
+      spectrum: Reserved compatibility argument; must be None. Only Forge's
+        installed Spectrum mechanism is permitted through native_spectrum.
+      native_spectrum: Native Spectrum control values, or None when disabled.
 
     Returns:
       List of decoded PIL Images.
     """
+    self._native_spectrum_stats = None
+    if spectrum is not None:
+      raise ValueError("Only Forge built-in Spectrum is allowed; this compatibility pipeline cannot accept a private forecaster.")
     strength = float(strength)
     if not np.isfinite(strength) or not 0.0 <= strength <= 1.0:
       raise ValueError("img2img strength must be between 0.0 and 1.0")
@@ -687,7 +691,13 @@ class Ideogram4Pipeline:
       return [init_image.copy()]
 
     partial_img2img = init_image is not None and 0.0 < strength < 1.0
-    if partial_img2img:
+    if phase_callback is not None:
+      phase_callback('Encoding')
+    fixed_schedule_steps = None
+    if partial_img2img and fixed_img2img_steps:
+      from .refiner import fixed_step_counts
+      fixed_schedule_steps, active_steps = fixed_step_counts(num_steps, strength)
+    elif partial_img2img:
       active_steps = max(1, int(np.ceil(num_steps * strength)))
     else:
       active_steps = num_steps
@@ -697,12 +707,18 @@ class Ideogram4Pipeline:
     self._verify_prompts(prompts, raise_on_issues=raise_on_caption_issues)
 
     schedule = get_schedule_for_resolution((height, width), known_mean=mu, std=std)
-    original_num_steps = num_steps
-    original_intervals = make_step_intervals(original_num_steps).to(self.device)
-    step_intervals = (
-      original_intervals[: active_steps + 1]
-      if partial_img2img else original_intervals
-    )
+    original_num_steps = fixed_schedule_steps or num_steps
+    if fixed_schedule_steps is not None:
+      # Only allocate the used interval prefix; tiny strengths must not create
+      # a full schedule with millions of unused entries.
+      step_intervals = torch.linspace(0.0, active_steps / original_num_steps,
+                                     active_steps + 1, dtype=torch.float32, device=self.device)
+    else:
+      original_intervals = make_step_intervals(original_num_steps).to(self.device)
+      step_intervals = (
+        original_intervals[: active_steps + 1]
+        if partial_img2img else original_intervals
+      )
     if partial_img2img:
       num_steps = active_steps
 
@@ -869,199 +885,174 @@ class Ideogram4Pipeline:
     if on_actual_steps is not None:
       on_actual_steps(num_steps)
 
-    # SPECTRUM: see pi_ideogram_lib/spectrum.py. Two forecasters, one per CFG
-    # branch, so the official 7->3 guidance schedule keeps being applied at
-    # each step's own weight instead of being baked into the history. Both
-    # live and die with this call, so a new image starts with no anchors.
-    _spectrum = spectrum if (spectrum is not None and spectrum.enabled) else None
-    _steps_plan = plan(num_steps, _spectrum) if _spectrum else [False] * num_steps
-    _fc_pos = VelocityForecaster(_spectrum) if _spectrum else None
-    _fc_neg = VelocityForecaster(_spectrum) if _spectrum else None
-    _spectrum_used = 0
-    _spectrum_refused = 0
-    if _spectrum:
-      print("[Invisible-I4] " + summarise(_steps_plan, num_steps))
-
     # Prompt projection is independent of timestep. Reuse it within this image;
     # temporary first-step adapters invalidate it immediately after removal.
     text_projection_cache = {}
-    _t_steps = _time.perf_counter()
-    for i in range(num_steps - 1, -1, -1):
-      t_val = float(schedule(step_intervals[i + 1].unsqueeze(0)).item())
-      s_val = float(schedule(step_intervals[i].unsqueeze(0)).item())
-      # BYPASS: shift first sigma up by +0.005 to bypass the model's baked-in safety filter
-      if filter_bypass and not partial_img2img and i == num_steps - 1:
-        t_val = t_val + 0.005
-      t = torch.full((batch_size,), t_val, dtype=torch.float32, device=self.device)
+    native = None
+    if native_spectrum is not None:
+      from .native_spectrum import ForgeSpectrum
+      native = ForgeSpectrum(num_steps, self.device, native_spectrum,
+                             model=self.conditional_transformer)
+      print("[Invisible-I4] Spectrum: Forge built-in SpectrumNode.patch")
 
-      pos_z = torch.cat([text_z_padding, z], dim=1)
+    def select_batch(value, indices):
+      return value if len(indices) == batch_size else value.index_select(0, indices)
 
-      gw_i = float(gw_per_step[i])
-      _step_idx = num_steps - 1 - i
-      set_step(_step_idx, num_steps)
+    def forward_cond(image_z, model_t, indices):
+      padding = select_batch(text_z_padding, indices)
+      hooks = (DebannerHooks(self.conditional_transformer, debanner_dirs,
+                            debanner_strength, max_text_tokens, grid_h, grid_w)
+               if use_debanner else _NullContext())
+      _t_fwd = _time.perf_counter()
+      with hooks as dbg:
+        result = self.conditional_transformer(
+          llm_features=select_batch(llm_features, indices),
+          text_cache=text_projection_cache,
+          x=torch.cat([padding, image_z], dim=1), t=model_t,
+          position_ids=select_batch(inputs["position_ids"], indices),
+          segment_ids=select_batch(inputs["segment_ids"], indices),
+          indicator=select_batch(inputs["indicator"], indices),
+        )
+      if use_debanner:
+        fired = sorted(set(getattr(dbg, "applied", [])))
+        print(f"[Invisible-I4] Debanner: corrected blocks {fired}" if fired
+              else "[Invisible-I4] Debanner: correction did NOT apply")
+      if image_z.is_cuda:
+        torch.cuda.synchronize()
+      _ph["fwd_cond"] += (_time.perf_counter() - _t_fwd) * 1000.0
+      return result[:, max_text_tokens:]
 
-      # SPECTRUM (opt-in, off by default). On a planned step the velocity is
-      # extrapolated from previous REAL steps and both forwards are skipped.
-      #
-      # A forecast is used only when every branch it needs came back with a
-      # trustworthy answer; the forecaster refuses (returns None) on a
-      # degenerate fit, a non-finite history, or a prediction that would jump
-      # the velocity magnitude. Any refusal falls through to the real network,
-      # so the worst case is the unaccelerated run, never a wrong image.
-      #
-      # The debanner step is never forecast: it exists to perturb the residual
-      # stream inside the transformer, and there is no transformer pass to
-      # perturb on a skipped step.
-      _do_forecast = (_spectrum is not None and _steps_plan[_step_idx]
-                      and not (bool(debanner_dirs) and i == debanner_step))
-      _need_neg = gw_i != 1.0
-      if _do_forecast:
-        _cand_pos = _fc_pos.predict(t_val)
-        _cand_neg = _fc_neg.predict(t_val) if _need_neg else None
-        if _cand_pos is not None and (_cand_neg is not None or not _need_neg):
-          _spectrum_used += 1
-          v = (gw_i * _cand_pos + (1.0 - gw_i) * _cand_neg) if _need_neg else _cand_pos
-        else:
-          _spectrum_refused += 1
-          _do_forecast = False
-      if not _do_forecast:
-        # DEBANNER (first step only). The correction tensor is emb_dim-wide, so
-        # it belongs on the residual stream INSIDE blocks 25-28 - hooks, not a
-        # post-hoc edit of the 128-channel velocity the model returns. Applying
-        # it to the output silently no-ops (shape mismatch), which is exactly
-        # what this used to do while reporting success.
-        use_debanner = bool(debanner_dirs) and i == debanner_step
-        if use_debanner:
-          hooks = DebannerHooks(self.conditional_transformer, debanner_dirs,
-                                debanner_strength, max_text_tokens, grid_h, grid_w)
-        else:
-          hooks = _NullContext()
-        with hooks as dbg:
-          _t_fwd = _time.perf_counter()
-          pos_out = self.conditional_transformer(
-            llm_features=llm_features,
-            text_cache=text_projection_cache,
-            x=pos_z,
-            t=t,
-            position_ids=inputs["position_ids"],
-            segment_ids=inputs["segment_ids"],
-            indicator=inputs["indicator"],
-          )
-        if use_debanner:
-          fired = sorted(set(getattr(dbg, "applied", [])))
-          if fired:
-            print(f"[Invisible-I4] Debanner: blocks {fired} corrected on step 1 "
-                  f"(strength={debanner_strength})")
-          else:
-            print("[Invisible-I4] Debanner: correction did NOT apply on any block "
-                  "(see the reason above); generation continues unchanged.")
-        if z.is_cuda:
-          torch.cuda.synchronize()
-        _ph["fwd_cond"] += (_time.perf_counter() - _t_fwd) * 1000.0
-        pos_v = pos_out[:, max_text_tokens:]
-
-        if has_uncond and gw_i != 1.0:
-          # MEMORY: on high-VRAM the uncond stays resident (ensure is a cheap
-          # device check); on low-VRAM this is the one re-upload before its pass.
-          self.memory.ensure_uncond_on_gpu()
-          _t_unc = _time.perf_counter()
-          neg_v = self.unconditional_transformer(
+    def forward_uncond(image_z, model_t, indices):
+      _t_unc = _time.perf_counter()
+      if has_uncond:
+        self.memory.ensure_uncond_on_gpu()
+        result = self.unconditional_transformer(
+          llm_features=None, x=image_z, t=model_t,
+          position_ids=select_batch(neg_position_ids, indices),
+          segment_ids=select_batch(neg_segment_ids, indices),
+          indicator=select_batch(neg_indicator, indices),
+        )
+      else:
+        adapter = self.uncond_adapter
+        ctx = adapter.active() if adapter is not None else _NullContext()
+        with ctx:
+          result = self.conditional_transformer(
             llm_features=None,
-            x=z,
-            t=t,
-            position_ids=neg_position_ids,
-            segment_ids=neg_segment_ids,
-            indicator=neg_indicator,
-          )
-          if z.is_cuda:
-            torch.cuda.synchronize()
-          _ph["fwd_uncond"] += (_time.perf_counter() - _t_unc) * 1000.0
-          v = gw_i * pos_v + (1.0 - gw_i) * neg_v
-        elif not has_uncond and gw_i != 1.0:
-          # No separate uncond transformer. Two sub-cases:
-          #  - an uncond-REPLACEMENT LoRA is loaded: switch it on for THIS pass
-          #    only, so the conditional pass above ran on clean weights. That
-          #    per-pass split is the whole point of the adapter; leaving it
-          #    merged for both passes makes CFG subtract two near-identical
-          #    outputs and prompt adherence collapses.
-          #  - nothing loaded: fall back to the documented zeroed-text
-          #    approximation on the cond model.
-          # The indicator removes every text slot in this branch. Explicit
-          # None conditioning skips the large zero allocation and projection.
-          adapter = self.uncond_adapter
-          ctx = adapter.active() if adapter is not None else _NullContext()
-          with ctx:
-            neg_out = self.conditional_transformer(
-              llm_features=None,
-              x=pos_z,
-              t=t,
-              position_ids=inputs["position_ids"],
-              segment_ids=inputs["segment_ids"],
-              indicator=neg_indicator_full(inputs),
-            )
-          neg_v = neg_out[:, max_text_tokens:]
+            x=torch.cat([select_batch(text_z_padding, indices), image_z], dim=1),
+            t=model_t,
+            position_ids=select_batch(inputs["position_ids"], indices),
+            segment_ids=select_batch(inputs["segment_ids"], indices),
+            indicator=select_batch(neg_indicator_full(inputs), indices),
+          )[:, max_text_tokens:]
+      if image_z.is_cuda:
+        torch.cuda.synchronize()
+      _ph["fwd_uncond"] += (_time.perf_counter() - _t_unc) * 1000.0
+      return result
+
+    def native_velocity(branch, forward):
+      # Forge's hook forecasts denoised endpoints, as KModel.apply_model does.
+      # Adapt flow velocity to that contract and preserve every real result
+      # exactly; only forecast items require conversion back to velocity.
+      actual = []
+      def denoised(image_z, model_t, indices):
+        velocity = forward(image_z, model_t, indices)
+        actual.append((indices, velocity))
+        sigma = (1.0 - model_t).reshape(-1, 1, 1)
+        return image_z + sigma * velocity
+      endpoint = native.evaluate(branch, z, t, denoised, step_index=_step_idx)
+      if actual and len(actual[0][0]) == batch_size:
+        return actual[0][1]
+      sigma = 1.0 - t_val
+      if sigma <= 1e-3:
+        raise RuntimeError('Spectrum attempted a forecast too close to the flow endpoint')
+      velocity = (endpoint - z) / sigma
+      for indices, real_velocity in actual:
+        velocity.index_copy_(0, indices, real_velocity)
+      return velocity
+
+    _t_steps = _time.perf_counter()
+    try:
+      if phase_callback is not None:
+        phase_callback('Sampling')
+      for i in range(num_steps - 1, -1, -1):
+        t_val = float(schedule(step_intervals[i + 1].unsqueeze(0)).item())
+        s_val = float(schedule(step_intervals[i].unsqueeze(0)).item())
+        # BYPASS: shift first sigma up by +0.005 to bypass the model's baked-in safety filter
+        if filter_bypass and not partial_img2img and i == num_steps - 1:
+          t_val = t_val + 0.005
+        t = torch.full((batch_size,), t_val, dtype=torch.float32, device=self.device)
+  
+        gw_i = float(gw_per_step[i])
+        _step_idx = num_steps - 1 - i
+        set_step(_step_idx, num_steps)
+  
+        use_debanner = bool(debanner_dirs) and i == debanner_step
+        if native is not None and (use_debanner or 1.0 - t_val <= 1e-3):
+          # A correction must execute real model forwards, not cached velocities.
+          native.reset()
+        indices = torch.arange(batch_size, device=self.device)
+        if native is not None:
+          pos_v = native_velocity(0, forward_cond)
+        else:
+          pos_v = forward_cond(z, t, indices)
+        if gw_i != 1.0:
+          neg_v = (native_velocity(1, forward_uncond) if native is not None
+                   else forward_uncond(z, t, indices))
           v = gw_i * pos_v + (1.0 - gw_i) * neg_v
         else:
           v = pos_v
-        # Only REAL velocities become anchors. Feeding a forecast back in
-        # would let its error compound step over step, which is the failure
-        # mode that turns "slightly different image" into "different image".
-        if _spectrum:
-          _fc_pos.update(t_val, pos_v)
-          if _need_neg:
-            _fc_neg.update(t_val, neg_v)
-
-      delta = s_val - t_val
-      z = z + v * delta
-      # FIRST-STEP-ONLY ADAPTERS (gray bypass LoRA): remove the temporary
-      # merge right after step 1's forwards, BEFORE any offload moves the
-      # weights CPU-side (the undo needs them on GPU).
-      if first_step_undo is not None:
-        try:
-          first_step_undo()
-        except Exception as e:
-          raise RuntimeError(f"First-step adapter cleanup failed: {e}") from e
-        first_step_undo = None
-        text_projection_cache.clear()
-        if _spectrum:
-          # The first velocity used different weights. Never extrapolate the
-          # remaining trajectory from an adapter that has now been removed.
-          _fc_pos.reset()
-          _fc_neg.reset()
-      # MEMORY: low-VRAM path parks uncond after each step; high-VRAM keeps it
-      # resident to avoid a 9.3 GB CPU<->GPU round trip on every step.
-      if has_uncond and gw_i != 1.0 and not high_vram:
-        self.memory.offload_uncond()
-      if step_callback is not None:
-        step_callback(num_steps - 1 - i, num_steps)
-      # Live previews show the actual noisy latent developing step by step.
-      # Forge publishes the full-resolution decoded result after sampling.
-      if preview_callback is not None:
-        # Sync BEFORE the timer: decode_preview ends in a .cpu() copy, so
-        # without this the preview phase is charged for every sampler kernel
-        # still queued from this step. That is what made the console claim
-        # "previews 15.7s" when the real cost, measured with syncs on both
-        # sides, was 0.71s for a whole 12-step generation.
-        if self.device.type == "cuda":
-          torch.cuda.synchronize()
-        _t_pv = _time.perf_counter()
-        # Show actual denoising: noise gradually develops into the final image.
-        # Display only; this never changes the sampling trajectory.
-        preview_callback(z)
-        _ph["preview"] += (_time.perf_counter() - _t_pv) * 1000.0
+  
+        delta = s_val - t_val
+        z = z + v * delta
+        # FIRST-STEP-ONLY ADAPTERS (gray bypass LoRA): remove the temporary
+        # merge right after step 1's forwards, BEFORE any offload moves the
+        # weights CPU-side (the undo needs them on GPU).
+        if first_step_undo is not None:
+          try:
+            first_step_undo()
+          except Exception as e:
+            raise RuntimeError(f"First-step adapter cleanup failed: {e}") from e
+          first_step_undo = None
+          text_projection_cache.clear()
+          if native is not None:
+            native.reset()
+        # MEMORY: low-VRAM path parks uncond after each step; high-VRAM keeps it
+        # resident to avoid a 9.3 GB CPU<->GPU round trip on every step.
+        if has_uncond and gw_i != 1.0 and not high_vram:
+          self.memory.offload_uncond()
+        if step_callback is not None:
+          step_callback(num_steps - 1 - i, num_steps)
+        # Live previews show the actual noisy latent developing step by step.
+        # Forge publishes the full-resolution decoded result after sampling.
+        if preview_callback is not None:
+          # Sync BEFORE the timer: decode_preview ends in a .cpu() copy, so
+          # without this the preview phase is charged for every sampler kernel
+          # still queued from this step. That is what made the console claim
+          # "previews 15.7s" when the real cost, measured with syncs on both
+          # sides, was 0.71s for a whole 12-step generation.
+          if self.device.type == "cuda":
+            torch.cuda.synchronize()
+          _t_pv = _time.perf_counter()
+          # Show actual denoising: noise gradually develops into the final image.
+          # Display only; this never changes the sampling trajectory.
+          preview_callback(z)
+          _ph["preview"] += (_time.perf_counter() - _t_pv) * 1000.0
+    finally:
+      if native is not None:
+        self._native_spectrum_stats = dict(
+          implementation="Forge built-in", real_calls=native.real_calls,
+          forecast_calls=native.forecast_calls, real_items=native.real_items,
+          forecast_items=native.forecast_items)
+        print(f"[Invisible-I4] Forge Spectrum: {native.real_calls} real branch calls, "
+              f"{native.forecast_calls} forecast branch calls")
+        native.close()
+        native = None
 
     _ph["steps"] += (_time.perf_counter() - _t_steps) * 1000.0
-    if _spectrum:
-      # Report what HAPPENED, not what was planned. A refusal means the
-      # forecaster declined and the real network ran, so the count of
-      # forwards actually skipped is the only number worth printing.
-      note = (f", {_spectrum_refused} declined -> computed normally"
-              if _spectrum_refused else "")
-      print(f"[Invisible-I4] Spectrum: {_spectrum_used}/{num_steps} steps "
-            f"forecast{note}")
-
     # MEMORY: reload VAE for decode (offloaded on both paths before sampling)
     _t_dec = _time.perf_counter()
+    if phase_callback is not None:
+      phase_callback('Decoding')
     # Decoder activations grow with canvas size. Sampling models are idle now.
     text_projection_cache.clear()
     self.memory.offload_uncond()

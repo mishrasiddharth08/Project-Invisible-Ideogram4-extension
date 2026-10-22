@@ -7,19 +7,22 @@
 ## The Project Invisible idea
 
 Use Forge's normal checkpoint selector, prompt, Generate button and image folders.
-Special controls stay inside a compact, collapsed **Ideogram 4** panel.
+Occasional Ideogram choices live in Forge **Settings**, with optional Quicksettings. The extension adds no accordion.
 “Invisible” means familiar—not hiding downloads, errors or limitations.
 This is an independent community extension, not an official Ideogram product.
+
+See [current blueprint acceptance status](docs/INTEGRATION_STATUS.md) for the exact
+integration limits and tests. Full native-pipeline compliance is not claimed.
 
 ## Features and testing status
 
 - **Text-to-image:** tested with local weights on the author's NVIDIA system.
 - **Image-to-image:** experimental latent regeneration, tested in a standalone GPU check. Editing stays in Forge's **img2img** tab.
-- **Organized controls:** generation recipe first; Style, Filter bypass, Performance and Model Setup grouped separately.
+- **Native controls:** normal prompts, dimensions, seeds, batch and denoising controls. Recipes, adapters and setup live in Forge Settings.
 - **Progress:** current-image and overall-batch bars; starting gradient, evolving previews, actual final image.
 - **Memory:** streaming/offloading, cached prompt features and safe release of cached models when switching checkpoints.
-- **Downloads:** manual installation recommended; optional downloads require selecting files and clicking Download.
-- **Adapters and acceleration:** compatible LoRA controls and optional speed settings; approximate acceleration can change image details.
+- **Downloads:** manual installation through source links in Forge Settings. Generate never downloads models.
+- **Adapters and acceleration:** compatible LoRA controls remain available. Enable Forge's existing **Spectrum Integrated** controls to use its installed native Spectrum implementation.
 
 Automated tests do not prove every GPU, model file or Forge version works.
 AMD/ROCm is **not hardware-validated here**. DirectML/Vulkan are not implemented.
@@ -38,7 +41,7 @@ No promise is made for every VRAM size.
 
 ## Model files
 
-**Weights are not included.** Open **Model Setup** for source links, compatible variants and optional selected-file downloads.
+**Weights are not included.** Open **Settings → Ideogram 4 setup & advanced** for source links, variants and destination folders.
 
 | Component | Forge folder |
 |---|---|
@@ -55,27 +58,17 @@ Review original licenses before downloading. Generate never silently fetches wei
 
 ## UI tour
 
-Everything lives inside Forge's normal txt2img / img2img view. The extension adds a single collapsed **Ideogram 4** accordion:
-
-![Ideogram 4 panel layout](docs/img/ui-tour.svg)
-
-Inside the panel:
-
-- **Generation recipe row** — pick a named preset for the official recipe. Recipes own their CFG schedule (and step count for distilled ones); Forge's sampler/scheduler selectors do not apply here. Forge's own size, seed, batch and Steps controls stay in charge.
-- **Style tab** — choose a style or character adapter; combine more with `<lora:name:strength>` in your prompt.
-- **Filter bypass tab** — adapter controls with one-click helper buttons (*Use Gray starting point*, *Gray + guidance LoRA (1.0)*, *Turn off*, *Refresh adapters*).
-- **Performance tab** — offloading, Spectrum/First Block Cache and other speed/memory options.
-- **Model Setup tab** — source links, compatible variants and optional selected-file downloads for every required weight.
-- **Status strip** — model detection, adapter hints and memory state, highlighted at the left edge of the panel.
+Use Forge\'s normal txt2img/img2img pages. There is no extension accordion.
+Open **Settings → Ideogram 4 compatibility** for recipes and adapters, or
+**Settings → Ideogram 4 setup & advanced** for model links and policies.
+Click **Apply settings**; selected options can also be added to Quicksettings.
 
 ## Step-by-step usage
 
-![Step-by-step first generation](docs/img/usage-steps.svg)
-
 1. **Install** — stop Forge, download the ZIP, rename the folder to `project-invisible-ideogram-4` and place it in `extensions/` (no double nesting).
-2. **Model files** — open the **Model Setup** tab and follow the printed links; download weights manually into the Forge folders listed below.
+2. **Model files** — open **Settings → Ideogram 4 setup & advanced** and follow the source links; download weights manually into the Forge folders listed below.
 3. **Select preset + checkpoint** — pick **ideogram4** in the preset selector and your conditional checkpoint in the checkpoint selector.
-4. **Configure (optional)** — expand the Ideogram 4 panel. For the first run keep **Balanced**, batch **1** and a modest image size. Style, Filter bypass and Performance are all optional; the defaults just work.
+4. **Configure (optional)** — use Forge Settings for optional recipes/adapters. Start with Euler, an empty Negative prompt, batch **1** and a modest image size.
 5. **Generate** — press Forge's normal **Generate** button. Two progress bars track the current image and the overall batch; evolving previews appear while sampling and the final image lands in the gallery after VAE decoding.
 
 ### Using an existing image (img2img)
@@ -88,8 +81,8 @@ Use Forge's normal **img2img** tab with its upload and denoising controls. Lower
 
 1. Select **ideogram4** in Forge's UI preset selector.
 2. Select your compatible **conditional** checkpoint.
-3. Open **txt2img**, enter a prompt and expand **Ideogram 4** if needed.
-4. Start with **Balanced**, batch **1** and a modest image size.
+3. Open **txt2img**, enter a prompt, select **Euler** and leave Negative prompt empty.
+4. Start with batch **1** and a modest image size. Optional recipes are in Forge Settings.
 5. Press Forge's normal **Generate** button.
 
 For an existing image, use **img2img** and its normal upload/denoising controls.
@@ -105,8 +98,10 @@ every second. The final image appears after VAE decoding.
 
 Offloading lowers VRAM pressure but uses system RAM and transfers, which can slow
 generation. Active generation is not killed by a checkpoint change; cleanup occurs
-at a safe boundary. Spectrum/First Block Cache trade exact output matching for
-possible speed. See [measurements](MEASURED-MEMORY-PREVIEW.md) and
+at a safe boundary. Private Spectrum/First Block Cache approximations are disabled.
+Forge's built-in Spectrum is connected through its real UnetPatcher hook; no private
+forecaster is used. It is approximate and can change image details. Very short
+recipes may finish before warmup allows any cached steps. See [Spectrum integration](docs/NATIVE_SPECTRUM.md), [measurements](MEASURED-MEMORY-PREVIEW.md) and
 [GPU limitations](GPU-COMPATIBILITY.md).
 
 ## Isolation and Forge updates

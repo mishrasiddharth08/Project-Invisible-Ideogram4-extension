@@ -276,34 +276,9 @@ def _our_alwayson_script(runner):
 
 
 def _resolve_run_opts(runner, p) -> dict:
-    """Resolved run settings for THIS generation - the ONLY place the accordion
-    values enter the engine.
-
-    Always-visible process() only runs inside processing.process_images, which
-    the takeover skips, so we slice our component values straight out of
-    p.script_args using args_from/args_to - the exact tuple process() would
-    have received. Any failure (missing script, short arg list, bad values)
-    falls back to config defaults; this never crashes a generate."""
-    ui_values = None
-    try:
-        script = _our_alwayson_script(runner)
-        if script is not None:
-            lo = int(getattr(script, "args_from", -1))
-            hi = int(getattr(script, "args_to", -1))
-            arr = getattr(p, "script_args", None)
-            if lo >= 0 and hi > lo and isinstance(arr, (tuple, list)) and len(arr) >= hi:
-                cand = tuple(arr[lo:hi])
-                if len(cand) == len(pi_settings.UI_KEYS):
-                    ui_values = cand
-    except Exception:
-        ui_values = None
-    try:
-        opts = pi_settings.resolve(ui_values=ui_values)
-        if ui_values is not None:
-            pi_settings.persist(ui_values)  # remember last-used values (spec M)
-        return opts
-    except Exception:
-        return pi_settings.resolve()
+    # Named Forge Settings and API override_settings share one request snapshot.
+    from pi_ideogram_forge.native_settings import resolve_run_options
+    return resolve_run_options(p)
 
 
 # --------------------------------------------------------------------------- #
@@ -388,6 +363,14 @@ def _generate_with_oom_recovery(p, opts: dict, *, orig_w: int, orig_h: int,
          raised to the UI).
 
     Non-OOM errors always raise (unchanged). Returns Processed."""
+
+    if getattr(p, '_pi_refining', False):
+        # A refiner must retain the original on failure, never silently resize
+        # it, switch recipes, retry a blocked result, or return an error card.
+        return _generate_fn(p, opts=opts, active_loras=_ACTIVE_LORAS,
+                            models_dirs=models_dirs(), get_pipeline_fn=_get_pipeline,
+                            lora_mod=lora, json_prompt_mod=json_prompt,
+                            **(generation_kwargs or {}))
 
     def _attempt(run_opts):
         """One generate() attempt. Returns Processed, or the OOM exception for
@@ -666,6 +649,9 @@ def _take_over_locked(runner, p):
     """
     if True:
         try:
+            from pi_ideogram_forge.contract import validate_request, validate_native_spectrum
+            validate_request(p)
+            native_spectrum = validate_native_spectrum(runner, p)
             generation_kwargs = _img2img_generation_kwargs(p)
             print(f"{TAG} stock Generate -> official Ideogram 4 pipeline (invisible takeover)")
             # ROUTING (audit R): the DETECTED format is the run-time authority -
@@ -679,6 +665,10 @@ def _take_over_locked(runner, p):
                 print(f"{TAG} [routing] policy check skipped ({e}) - proceeding")
             # Resolve the accordion values -> run settings (single owner: settings.py)
             opts = _resolve_run_opts(runner, p)
+            opts['native_spectrum'] = native_spectrum
+            if getattr(p, '_pi_refining', False):
+                from pi_ideogram_lib.refiner import neutral_options
+                opts = neutral_options(opts)
             _maybe_download_adapters(opts)
             # Fix the seed ONCE so an auto-escalation retry re-runs the SAME image
             try:
@@ -693,18 +683,19 @@ def _take_over_locked(runner, p):
                                                    generation_kwargs=generation_kwargs)
 
             proc = _run_with_recovery(opts)
+            if getattr(p, '_pi_refining', False):
+                return proc
             # gray 'blocked' output -> one same-seed retry at the next strength anchor
             return _auto_escalate_blocked(p, opts, proc, _run_with_recovery)
         except InterruptedError:
             raise
         except Exception as e:
+            if getattr(p, '_pi_refining', False):
+                raise
             print(f"{TAG} generation failed: {e}")
             traceback.print_exc()
-            from PIL import Image, ImageDraw
-            img = Image.new("RGB", (1024, 256), "white")
-            ImageDraw.Draw(img).text((16, 16), f"Ideogram 4 generation error:\n{str(e)[:400]}", fill="black")
             _safe_comment(p, f"Ideogram 4: {e}")
-            return Processed(p, [img], -1 if p.seed is None else int(p.seed), f"Ideogram 4 error: {e}")
+            raise
 
 
 def _wrapped_run(self, p, *args, **kwargs):
@@ -738,7 +729,8 @@ def _wrapped_process_images(p, *args, **kwargs):
               "official Ideogram 4 pipeline")
         # No ScriptRunner here, so no accordion values: _take_over falls back to
         # the persisted config defaults, which is the documented API behaviour.
-        return _take_over(None, p)
+        runner = getattr(p, 'scripts', None)
+        return _take_over(runner, p)
     return _ORIGINAL_PROCESS_IMAGES(p, *args, **kwargs)
 
 

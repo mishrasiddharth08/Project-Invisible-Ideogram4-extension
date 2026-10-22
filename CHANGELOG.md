@@ -1,3 +1,13 @@
+# Native Spectrum preview — 2026-10-23
+
+- Use Forge Neo's installed Spectrum and existing controls; remove private forecasting.
+- Move extension controls to native Settings; no extension accordion.
+- Improve two-bar progress, developing previews, final-image handoff and model-switch cleanup.
+- Validate request compatibility early and report failures honestly.
+- Include native Spectrum regression tests and an explicit full-weight GPU check.
+- Keep model acquisition manual and preserve community credits.
+- Tested on RTX 5090; other GPUs and future Forge versions remain unverified.
+
 # V3 audit fixes — 2026-09-10
 
 - Restore the native top-left `ideogram4` UI Preset removed in V2, without enum-member surgery or Forge core edits; preserve existing settings and stock presets.
