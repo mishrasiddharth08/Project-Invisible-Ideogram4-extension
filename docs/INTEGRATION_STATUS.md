@@ -77,16 +77,18 @@ Unrelated work trees, duplicate release checkout, old backups, quote utilities,
 generated images, the global attention patch and private Spectrum source were
 moved into `G:\Project-Invisible-Backups\ideogram4-cleanup-20261022`.
 They remain recoverable. Ideogram code, settings, optional correction asset,
-licenses, documentation, version history and relevant tests remain in the extension.
+licenses, documentation and relevant tests remain in the extension.
 
-Three old image-evidence directories under `tests` remain inaccessible:
-`img2img-check-ubjxdbxm`, `memory-preview-9ajcodep`, and `memory-preview-fs4awlvx`.
-Windows denied ordinary moves; automatic approval review rejected taking ownership
-and changing their permissions. They were left untouched. Permission changes
-require the user's explicit approval before cleanup can finish.
+On October 23, the old `tests` parent was moved on the same drive to
+`G:\Project-Invisible-Backups\ideogram4-tests-recovery-20261023`, then only verified
+test source was restored. This removed all three protected image-output folders
+from the extension without changing their permissions or deleting their contents.
+Local `.git` metadata, temporary publishing/validation tools, obsolete reports and
+bytecode caches were also moved to recovery storage outside Forge.
 
-Restart Forge to unload the old in-memory UI/hooks and activate this revision.
-No changes from this task were pushed to GitHub.
+Forge was restarted and the live preview/sampler callback verified. The source
+update was published to the existing GitHub repository; models and private
+settings/images were not uploaded.
 # Live-preview repair validation — 2026-10-23
 
 - Tested through the running Forge Neo browser UI, not only an isolated worker.
