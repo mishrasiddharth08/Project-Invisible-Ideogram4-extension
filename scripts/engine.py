@@ -40,6 +40,7 @@ from pi_ideogram_forge.generate import (  # noqa: E402,F401
     _resolve_seed, _safe_comment,
 )
 from pi_ideogram_forge.native_settings import install_native_settings  # noqa: E402
+from pi_ideogram_forge.ui_defaults import install as install_ui_defaults  # noqa: E402
 import pi_ideogram_forge.lora as lora  # noqa: E402
 
 TAG = "[Invisible-I4]"
@@ -98,5 +99,6 @@ if _FORGE_OK and scripts is not None:
 
 
     install_native_settings()
+    install_ui_defaults()
     install_wrapper()
     install_dropdown_hook()

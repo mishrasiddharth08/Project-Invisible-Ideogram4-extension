@@ -1022,8 +1022,8 @@ class Ideogram4Pipeline:
           self.memory.offload_uncond()
         if step_callback is not None:
           step_callback(num_steps - 1 - i, num_steps)
-        # Live previews show the actual noisy latent developing step by step.
-        # Forge publishes the full-resolution decoded result after sampling.
+        # Native model previews show the predicted clean endpoint, not raw
+        # noisy latents. This display-only estimate must never replace z.
         if preview_callback is not None:
           # Sync BEFORE the timer: decode_preview ends in a .cpu() copy, so
           # without this the preview phase is charged for every sampler kernel
@@ -1033,9 +1033,7 @@ class Ideogram4Pipeline:
           if self.device.type == "cuda":
             torch.cuda.synchronize()
           _t_pv = _time.perf_counter()
-          # Show actual denoising: noise gradually develops into the final image.
-          # Display only; this never changes the sampling trajectory.
-          preview_callback(z)
+          preview_callback(self._preview_endpoint(z, v, s_val))
           _ph["preview"] += (_time.perf_counter() - _t_pv) * 1000.0
     finally:
       if native is not None:
@@ -1111,35 +1109,26 @@ class Ideogram4Pipeline:
     decoded = decoded.permute(0, 2, 3, 1).cpu().numpy()
     return [Image.fromarray(arr) for arr in decoded]
 
+  @staticmethod
+  def _preview_endpoint(z, velocity, image_fraction):
+    """Predict clean image from the UPDATED flow state; no in-place writes."""
+    return z + (1.0 - image_fraction) * velocity
+
   def decode_preview(self, z: torch.Tensor, preview_pixels: int = 256) -> Image.Image | None:
-    """Decode the in-flight latent into a small preview image.
-
-    Two things the previous implementation got wrong, both fixed here:
-
-    1. DEVICE. The VAE is parked on CPU for the whole sampling loop (see the
-       memory policy in __call__), so decoding immediately raised a device
-       mismatch on every call and the blanket except returned None - the live
-       preview never once rendered. We now bring the VAE up (it is by far the
-       smallest of the four models), decode, and park it again on the
-       low-VRAM path.
-    2. FRAMING. The first grid*grid tokens are NOT the top-left corner: tokens
-       are row-major across a grid_w-wide grid, so that slice is the first few
-       full rows of the image squashed into a square. We decode the real grid
-       and thumbnail it instead.
-
-    Args:
-        z: Latent tensor, shape (B, num_tokens, channels).
-        preview_pixels: Longest edge of the returned image (default 256).
-
-    Returns:
-        PIL.Image, or None if no preview can be produced right now.
-    """
+    """Use installed Forge RGB previews; standalone hosts fall back to a VAE thumbnail."""
     grid = self._preview_grid
     if grid is None or self.autoencoder is None:
       return None
     grid_h, grid_w = grid
     if z.shape[1] < grid_h * grid_w:
       return None
+    try:
+      from .native_preview import decode_native_preview
+      return decode_native_preview(z, grid, self.config.patch_size, preview_pixels)
+    except (ImportError, AttributeError) as error:
+      if not getattr(self, '_native_preview_fallback_reported', False):
+        self._native_preview_fallback_reported = True
+        print(f'[Invisible-I4] Native RGB preview unavailable ({error}); using VAE thumbnail')
     try:
       self.memory.ensure_vae_on_gpu()
       z_one = z[:1, : grid_h * grid_w, :].detach()
@@ -1172,7 +1161,10 @@ class Ideogram4Pipeline:
       if max(img.size) > preview_pixels:
         img.thumbnail((preview_pixels, preview_pixels), Image.BILINEAR)
       return img
-    except Exception:
+    except Exception as error:
+      if not getattr(self, '_preview_error_reported', False):
+        self._preview_error_reported = True
+        print(f'[Invisible-I4] Preview decode failed: {error}')
       return None
     finally:
       if self._preview_low_vram:

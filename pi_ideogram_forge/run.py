@@ -631,7 +631,9 @@ def _take_over(runner, p):
         lifecycle.release_changed(_PIPELINE_CACHE, shared.opts.sd_model_checkpoint)
         lifecycle.selection = shared.opts.sd_model_checkpoint
         try:
-            return _take_over_locked(runner, p)
+            from .preview import native_preview_session
+            with native_preview_session(shared.opts):
+                return _take_over_locked(runner, p)
         finally:
             lifecycle.release_changed(_PIPELINE_CACHE, shared.opts.sd_model_checkpoint)
 
@@ -799,4 +801,4 @@ def install_wrapper():
     install_lifecycle(_PIPELINE_CACHE)
     print(f"{TAG} Invisible takeover installed: select an Ideogram 4 checkpoint in the normal "
           "dropdown ('Ideogram4 - <name>') and press Generate. LoRAs/LoKrs via the usual "
-          "<lora:name:strength> prompt tags. Filter-bypass panel inside the accordion.")
+          "<lora:name:strength> prompt tags. Additional controls are in native Settings.")

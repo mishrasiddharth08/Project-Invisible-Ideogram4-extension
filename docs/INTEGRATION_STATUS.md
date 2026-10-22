@@ -87,3 +87,23 @@ require the user's explicit approval before cleanup can finish.
 
 Restart Forge to unload the old in-memory UI/hooks and activate this revision.
 No changes from this task were pushed to GitHub.
+# Live-preview repair validation — 2026-10-23
+
+- Tested through the running Forge Neo browser UI, not only an isolated worker.
+- RTX 5090; Ideogram INT8 ConvRot, matching Qwen3-VL encoder and Flux2 VAE;
+  1280×1920, 30 steps, native Spectrum enabled, unconditional LoRA and a local
+  character adapter. Saved final images and checked their pixels.
+- Observed changing native RGB previews during sampling and two separately
+  visible progress bars. RGB coefficients come from installed Forge; no private
+  approximate-decoder weights or per-step VAE transfers are needed.
+- Matched-seed final pixels were identical before/after clean preview changes
+  and before/after replacing VAE thumbnails with native RGB previews.
+- The final single-image check reported 70.06 seconds including encoding and
+  decoding, 12.51 GiB peak PyTorch allocated memory, and preview timing rounded
+  to 0.0 seconds. This is integration evidence, not a controlled speed benchmark
+  or total-device-memory guarantee.
+- Native live previews were explicitly enabled in the tested host Settings,
+  with one-step generation and a 1000 ms browser refresh interval. An individual
+  model step can take longer than that interval; intermediate RGB previews are
+  approximations, while the saved final image uses the full VAE.
+

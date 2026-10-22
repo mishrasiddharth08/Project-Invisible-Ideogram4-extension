@@ -11,6 +11,13 @@ from functools import wraps
 
 PRESET_NAME = "ideogram4"
 TAG = "[Invisible-I4]"
+SAMPLER_KEYS = ("ideogram4_t2i_sampler", "ideogram4_i2i_sampler")
+
+
+def _enforce_sampler_defaults(opts) -> None:
+    """Discard stale preset values that the Ideogram contract cannot run."""
+    for key in SAMPLER_KEYS:
+        opts.data[key] = "Euler"
 
 
 def _wrap_choices(arch):
@@ -89,6 +96,7 @@ def install() -> bool:
         arch = presets.PresetArch
         arch.choices()  # Probe compatibility before touching anything.
         _register_options(presets, shared.opts)
+        _enforce_sampler_defaults(shared.opts)
         _wrap_choices(arch)
         key = "forge_checkpoint_ideogram4"
         current = getattr(shared.opts, "sd_model_checkpoint", None)

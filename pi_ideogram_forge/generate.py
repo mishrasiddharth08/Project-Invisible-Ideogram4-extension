@@ -1132,6 +1132,8 @@ def _run_sampling(
                 # our preview cadence mid-generation. We publish current_image
                 # directly, so we owe Forge nothing here but an id bump.
                 _preview_tick = [0]
+                _preview_warning = [False]
+                _preview_time = [0.0]
 
                 def _preview(z_latent):
                     if not _FORGE_OK or not _PREVIEW_ON:
@@ -1140,25 +1142,27 @@ def _run_sampling(
                     if _preview_tick[0] % _PREVIEW_EVERY != 0:
                         return
                     try:
-                        # LINEAR PROGRESS: preview on EVERY scheduled step (the
-                        # old 1.0 s wall-clock throttle skipped steps, so the
-                        # image and bar jumped instead of advancing one notch
-                        # per step). Forge's show_progress_every_n_steps still
-                        # controls the cadence via _PREVIEW_EVERY above.
-                        #
-                        # COMPLETE PICTURE AT THE LAST STEP: built-in models
-                        # show the finished image the moment sampling ends, not
-                        # a thumbnail that lingers until the decode phase. On
-                        # the final step we decode the preview at full canvas
-                        # size, so the last preview IS the final image.
+                        # Decode at most once a second, not a full VAE pass for
+                        # every fast step. Final decode below publishes exact
+                        # final pixels once, without a duplicate full-size pass.
                         _last = shared.state.sampling_step >= max(1, image_actual_steps[0])
-                        _px = max(width, height) if _last else 256
-                        img = pipe.decode_preview(z_latent, preview_pixels=_px)
+                        if _last:
+                            return
+                        _now = time.monotonic()
+                        if _now - _preview_time[0] < 1.0:
+                            return
+                        _preview_time[0] = _now
+                        img = pipe.decode_preview(z_latent, preview_pixels=384)
                         if img is not None:
                             from .preview import publish_frame
                             publish_frame(shared.state, img)
-                    except Exception:
-                        pass
+                        elif not _preview_warning[0]:
+                            _preview_warning[0] = True
+                            print(f"{TAG} preview decoder returned no frame; final decoding will still run")
+                    except Exception as error:
+                        if not _preview_warning[0]:
+                            _preview_warning[0] = True
+                            print(f"{TAG} live preview failed: {error}; final decoding will still run")
 
                 try:
                     if gray_steps is not None:

@@ -71,6 +71,17 @@ Click **Apply settings**; selected options can also be added to Quicksettings.
 4. **Configure (optional)** — use Forge Settings for optional recipes/adapters. Start with Euler, an empty Negative prompt, batch **1** and a modest image size.
 5. **Generate** — press Forge's normal **Generate** button. Two progress bars track the current image and the overall batch; evolving previews appear while sampling and the final image lands in the gallery after VAE decoding.
 
+Ideogram temporarily enables Forge's native preview transport while it runs,
+even if global live previews were disabled, and restores your preference afterward.
+Intermediate previews show the predicted clean picture using Forge's installed
+lightweight Flux2 RGB preview coefficients, without repeated VAE decodes. They
+refresh at most once a second (or after the next completed step); the final image
+is fully VAE-decoded only once. Selecting an Ideogram checkpoint
+sets both native samplers to Euler. LoRA tags accept unique native aliases such
+as `Gray`, as well as exact filenames; ambiguous names are refused.
+An enabled separate Refiner adds its own generation stage and may change pixels;
+disable that Refiner for a clean Ideogram-only comparison.
+
 ### Using an existing image (img2img)
 
 ![img2img flow](docs/img/img2img-flow.svg)

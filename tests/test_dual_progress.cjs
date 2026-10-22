@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 function element() {
-    return {style: {}, children: [], attributes: {}, className: '',
+    return {style: {setProperty(k,v) { this[k] = v; }}, children: [], attributes: {}, className: '',
         classList: {contains(name) { return name === 'progressDiv'; }},
         setAttribute(k, v) { this.attributes[k] = v; },
         appendChild(child) { this.children.push(child); this.firstChild = child; return child; },
@@ -20,6 +20,8 @@ context.window.requestProgress('task', {parentNode: parent}, null, () => ended =
 report({active: true, textinfo: 'Ideogram 4 | Image 1/2 | Step 6/12', progress: .25});
 assert.equal(parent.children.length, 2);
 assert.equal(parent.children[1].firstChild.style.width, '50%');
+assert.equal(parent.children[1].style.position, 'relative');
+assert.equal(parent.children[1].style.top, 'auto');
 assert.equal(stock.firstChild.textContent, 'Overall: 25%');
 report({active: true, textinfo: 'Ideogram 4 | Image 2/2 | Step 0/12', progress: .5});
 assert.equal(parent.children.length, 2);
@@ -29,3 +31,6 @@ finish(); assert.equal(parent.children.length, 1); assert.equal(ended, true);
 report({active: true, textinfo: 'Other model', progress: .4});
 assert.equal(parent.children.length, 1);
 console.log('Dual progress: passed');
+const css = fs.readFileSync('style.css', 'utf8');
+assert.match(css, /\.pi-i4-current\.progressDiv\s*\{[^}]*position:\s*relative\s*!important/s);
+assert.match(css, /\.pi-i4-current\.progressDiv\s*\{[^}]*top:\s*auto\s*!important/s);

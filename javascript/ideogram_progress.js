@@ -16,6 +16,12 @@ onUiLoaded(function () {
                 if (!current) {
                     current = document.createElement('div');
                     current.className = 'progressDiv pi-i4-current';
+                    // Forge absolutely positions progressDiv; a second one
+                    // otherwise sits exactly on top of the overall bar.
+                    current.style.setProperty('position', 'relative', 'important');
+                    current.style.setProperty('top', 'auto', 'important');
+                    current.style.marginTop = '12px';
+                    current.style.marginBottom = '4px';
                     current.setAttribute('role', 'progressbar');
                     current.setAttribute('aria-label', 'Current generation');
                     current.setAttribute('aria-valuemin', '0');

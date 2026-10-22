@@ -21,6 +21,7 @@ Adapter contract (spec section H):
 from __future__ import annotations
 
 import re
+import json
 from pathlib import Path
 
 TAG = "[Invisible-I4]"
@@ -35,14 +36,40 @@ def lora_search_dirs(models_dirs: list[Path]) -> list[Path]:
     return _detect_dirs(models_dirs)
 
 
+def _safetensors_alias(path: Path) -> str | None:
+    """Read Forge's native LoRA alias (ss_output_name) without loading weights."""
+    try:
+        with path.open("rb") as f:
+            header_len = int.from_bytes(f.read(8), "little")
+            if not 2 < header_len <= 64 * 1024 * 1024:
+                return None
+            header = json.loads(f.read(header_len))
+        alias = header.get("__metadata__", {}).get("ss_output_name")
+        return alias.strip() if isinstance(alias, str) and alias.strip() else None
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def find_lora_file(name: str, models_dirs: list[Path]) -> Path | None:
-    """Search all Ideogram 4 LoRA dirs (plus any Lora subfolder) for a matching
-    .safetensors file whose stem equals `name`."""
+    """Resolve an exact filename first, then a unique native Forge alias."""
     target = name[:-12] if name.lower().endswith(".safetensors") else name
+    candidates: dict[str, Path] = {}
     for d in lora_search_dirs(models_dirs):
         for cand in d.rglob("*.safetensors"):
-            if cand.stem.casefold() == target.casefold():
-                return cand
+            candidates.setdefault(str(cand.resolve()).casefold(), cand)
+
+    exact = [p for p in candidates.values() if p.stem.casefold() == target.casefold()]
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        raise ValueError(f"LoRA name '{name}' is ambiguous; use a unique filename/path.")
+
+    aliases = [p for p in candidates.values()
+               if (_safetensors_alias(p) or "").casefold() == target.casefold()]
+    if len(aliases) == 1:
+        return aliases[0]
+    if len(aliases) > 1:
+        raise ValueError(f"LoRA alias '{name}' is ambiguous; use the exact filename.")
     return None
 
 
@@ -310,7 +337,7 @@ def apply_lora_set(pipe, loras: list[tuple[str, float, str]]) -> list[str]:
     for name, strength, policy in loras:
         path = find_lora_file(name, _MODELS_DIRS_CACHE)
         if path is None:
-            continue
+            raise ValueError(f"LoRA '{name}' disappeared after prompt validation; generation stopped.")
         info = classify_adapter(path)
         kind = info["kind"]
         if kind == "incompatible" or not inspect_lora(path)["is_ideogram4"]:

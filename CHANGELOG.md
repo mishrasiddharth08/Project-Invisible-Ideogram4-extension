@@ -1,5 +1,10 @@
 # Native Spectrum preview — 2026-10-23
 
+- Repair native live-preview delivery when the global preview switch is off; restore other models' preferences after the job.
+- Avoid duplicate final VAE decode and throttle intermediate preview decoding to one per second.
+- Show clean endpoint estimates without changing sampled pixels; keep both progress bars visible rather than overlapping.
+- Use the installed Forge Flux2 RGB preview coefficients with correct Ideogram unpacking; avoid per-step VAE transfers/decodes.
+- Select Euler in both native tabs on Ideogram checkpoint selection and resolve unique native LoRA aliases such as Gray.
 - Use Forge Neo's installed Spectrum and existing controls; remove private forecasting.
 - Move extension controls to native Settings; no extension accordion.
 - Improve two-bar progress, developing previews, final-image handoff and model-switch cleanup.

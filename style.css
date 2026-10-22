@@ -30,6 +30,12 @@
   border-radius: 4px;
 }
 /* Blend real sampling previews; final gallery image remains untouched. */
+.pi-i4-current.progressDiv {
+  position: relative !important;
+  top: auto !important;
+  margin-top: 12px;
+  margin-bottom: 4px;
+}
 .pi-i4-developing .livePreview > img:last-child {
   animation: pi-i4-reveal 450ms ease-out both;
 }

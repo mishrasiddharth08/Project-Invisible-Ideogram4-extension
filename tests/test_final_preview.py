@@ -5,10 +5,36 @@ from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from pi_ideogram_forge.preview import publish_final, publish_start
+from pi_ideogram_forge.preview import native_preview_session, publish_final, publish_start
 
 
 class FinalPreviewTests(unittest.TestCase):
+    def test_disabled_host_transport_enabled_for_job_only(self):
+        options = SimpleNamespace(data={'live_previews_enable': False,
+                                        'show_progress_every_n_steps': -1})
+        original = dict(options.data)
+        with native_preview_session(options):
+            self.assertTrue(options.data['live_previews_enable'])
+            self.assertEqual(options.data['show_progress_every_n_steps'], 1)
+            with native_preview_session(options):
+                self.assertTrue(options.data['live_previews_enable'])
+        self.assertEqual(options.data, original)
+
+    def test_preview_preferences_restored_after_error(self):
+        options = SimpleNamespace(data={})
+        with self.assertRaisesRegex(RuntimeError, 'cancelled'):
+            with native_preview_session(options):
+                raise RuntimeError('cancelled')
+        self.assertEqual(options.data, {})
+
+    def test_user_preview_change_during_generation_is_preserved(self):
+        options = SimpleNamespace(data={'live_previews_enable': True})
+        with native_preview_session(options):
+            options.data['live_previews_enable'] = False
+            options.data['show_progress_every_n_steps'] = 4
+        self.assertFalse(options.data['live_previews_enable'])
+        self.assertEqual(options.data['show_progress_every_n_steps'], 4)
+
     def test_gradient_canvas_then_exact_final(self):
         state = SimpleNamespace(current_image=None, sampling_step=9, id_live_preview=2)
         publish_start(state, 1024, 512)

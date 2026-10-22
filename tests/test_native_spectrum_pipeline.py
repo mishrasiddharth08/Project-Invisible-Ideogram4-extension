@@ -44,6 +44,52 @@ def sample(pipe, options=None, **kwargs):
 
 
 @torch.no_grad()
+def test_clean_previews_change_without_changing_final_latents():
+    pipe = tiny_pipeline()
+    try:
+        baseline = sample(pipe)
+        frames = []
+        result = sample(pipe, preview_callback=lambda z: frames.append(z.clone()))
+        torch.testing.assert_close(result, baseline, rtol=0, atol=0)
+        assert len(frames) == 16
+        assert all(torch.isfinite(frame).all() for frame in frames)
+        assert not torch.equal(frames[0], frames[-1])
+        z, v = torch.ones(2), torch.full((2,), 4.)
+        clean = pipe._preview_endpoint(z, v, .25)
+        assert torch.equal(clean, torch.full((2,), 4.))
+        assert torch.equal(z, torch.ones(2))
+        assert torch.equal(v, torch.full((2,), 4.))
+    finally:
+        pipe.uncond_adapter.remove()
+
+
+def test_installed_native_rgb_preview_unpacks_without_vae_or_mutation(monkeypatch):
+    monkeypatch.setattr(sys, 'argv', [sys.argv[0]])  # Forge parses its own CLI on first import
+    from pi_ideogram_lib.native_preview import decode_native_preview, _native_factors
+    factors, bias = _native_factors()
+    assert factors.shape == (3, 32)
+    z = torch.zeros(1, 6, 128)
+    z[..., 0] = 1  # first spatial pixel's first channel in each packed token
+    original = z.clone()
+    image = decode_native_preview(z, (2, 3), preview_pixels=6)
+    assert image.size == (6, 4)
+    expected = ((factors[:, 0] + bias) * .5 + .5).clamp(0, 1).mul(255).round().to(torch.uint8)
+    assert image.getpixel((0, 0)) == tuple(expected.tolist())
+    assert image.getpixel((1, 0)) != image.getpixel((0, 0))
+    assert torch.equal(z, original)
+    pipe = tiny_pipeline()
+    try:
+        pipe.autoencoder = object()
+        pipe._preview_grid = (2, 3)
+        pipe.memory.reset_mock()
+        assert pipe.decode_preview(z).size == (256, 171)
+        pipe.memory.ensure_vae_on_gpu.assert_not_called()
+        pipe.memory.offload_vae.assert_not_called()
+    finally:
+        pipe.uncond_adapter.remove()
+
+
+@torch.no_grad()
 def test_native_window_one_matches_spectrum_off_and_does_not_leak():
     pipe = tiny_pipeline()
     try:
