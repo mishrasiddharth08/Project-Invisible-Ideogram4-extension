@@ -341,6 +341,8 @@ def generate(
     init_images=None,
     denoising_strength: float = 0.75,
     resize_mode: int = 0,
+    selected_path=None,
+    additional_modules=None,
 ) -> object:  # returns Processed
     """Run the Ideogram 4 generation pipeline.
 
@@ -369,7 +371,7 @@ def generate(
         opts = _resolve_settings()
     opts = dict(opts or {})
 
-    cond_path = _get_ideogram_file()
+    cond_path = Path(selected_path) if selected_path is not None else _get_ideogram_file()
     if cond_path is None:
         raise RuntimeError("Ideogram 4 is not the selected checkpoint.")
     # UNCOND HALF REFUSAL (playtest defect 1): the uncond file is a diffusion
@@ -612,7 +614,10 @@ def generate(
     want_uncond = (not turbo) and (not use_uncond_lora)
 
     # --- pipeline (cache key includes LoRA set + turbo + uncond mode) ----------
-    pipe = get_pipeline_fn(cond_path, want_uncond=want_uncond, turbo=turbo)
+    pipeline_kw = dict(want_uncond=want_uncond, turbo=turbo)
+    if additional_modules is not None:
+        pipeline_kw["additional_modules"] = additional_modules
+    pipe = get_pipeline_fn(cond_path, **pipeline_kw)
     if use_uncond_lora and not turbo and models_dirs:
         # UNTAGGED uncond-LoRA runs (OOM retry swaps to this path with no
         # <lora:...> tag in the prompt): auto-stage the Ostris uncond-

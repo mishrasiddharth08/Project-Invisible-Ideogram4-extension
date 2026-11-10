@@ -48,8 +48,8 @@ from pi_ideogram_lib import json_prompt  # noqa: E402
 import pi_ideogram_forge.lora as lora  # noqa: E402
 from pi_ideogram_forge.paths import models_dirs  # noqa: E402
 from pi_ideogram_forge.selection import (  # noqa: E402
-    _current_ideogram_file,
-    is_ideogram4_selected,
+    is_ideogram4_request,
+    request_ideogram_file,
 )
 from pi_ideogram_forge.generate import (  # noqa: E402
     generate as _generate_fn,
@@ -107,7 +107,8 @@ def _file_identity(path):
         return (str(p), None, None)
 
 
-def _get_pipeline(selected_path: Path, want_uncond: bool = True, turbo: bool = False):
+def _get_pipeline(selected_path: Path, want_uncond: bool = True, turbo: bool = False,
+                  additional_modules=None):
     """Cache key includes the active LoRA set + turbo flag + uncond mode, so
     deltas never leak between generations with different settings.
 
@@ -152,7 +153,28 @@ def _get_pipeline(selected_path: Path, want_uncond: bool = True, turbo: bool = F
 
     # Resolve BEFORE looking in the cache. A different TE or VAE is a different
     # pipeline, even when the checkpoint and prompt have not changed.
-    te, vae, _te_vae_notes = resolve_te_vae(models_dirs())
+    if additional_modules is None:
+        te, vae, _te_vae_notes = resolve_te_vae(models_dirs())
+    else:
+        from pi_ideogram_lib.detect import classify_module, _te_size_ok
+        from modules_forge.main_entry import module_list
+        te = vae = None
+        for value in additional_modules:
+            path = Path(str(value))
+            if not path.is_file() and path.name in module_list:
+                path = Path(module_list[path.name])
+            if not path.is_file():
+                continue
+            kind = classify_module(path)
+            if kind == "te" and te is None and _te_size_ok(path):
+                te = path
+            elif kind == "vae" and vae is None:
+                vae = path
+        if te is None or vae is None:
+            raise ValueError("Ideogram 4 API request requires a Qwen3-VL-8B text encoder "
+                             "and FLUX.2 VAE in forge_additional_modules.")
+        _te_vae_notes = [f"text encoder: using API request ({te.name})",
+                         f"VAE: using API request ({vae.name})"]
     lora_key = tuple((str(n), float(s), str(policy),
                       _file_identity(lora.find_lora_file(str(n), models_dirs())))
                      for n, s, policy in _ACTIVE_LORAS)
@@ -338,7 +360,26 @@ def generate(p, **kw):
     kw.setdefault("lora_mod", lora)
     kw.setdefault("json_prompt_mod", json_prompt)
     kw.setdefault("active_loras", _ACTIVE_LORAS)
+    kw.setdefault("selected_path", request_ideogram_file(p))
+    kw.setdefault("additional_modules", _request_additional_modules(p))
     return _generate_fn(p, **kw)
+
+
+def _request_additional_modules(p):
+    overrides = getattr(p, "override_settings", None) or {}
+    for key in ("forge_additional_modules", "forge_additional_modules_ideogram4"):
+        if key in overrides:
+            value = overrides.get(key)
+            return list(value or ()) if not isinstance(value, str) else [value]
+    if overrides.get("sd_model_checkpoint") and request_ideogram_file(p):
+        from modules import shared
+        from modules_forge.main_entry import module_list
+
+        saved = shared.opts.data.get("forge_additional_modules_ideogram4") or []
+        paths = [module_list.get(Path(value).name, value) for value in saved]
+        if paths and all(Path(path).is_file() for path in paths):
+            return paths
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -655,12 +696,18 @@ def _take_over_locked(runner, p):
             validate_request(p)
             native_spectrum = validate_native_spectrum(runner, p)
             generation_kwargs = _img2img_generation_kwargs(p)
+            generation_kwargs["selected_path"] = request_ideogram_file(p)
+            if generation_kwargs["selected_path"] is not None:
+                p.sd_model_name = generation_kwargs["selected_path"].stem
+            request_modules = _request_additional_modules(p)
+            if request_modules is not None:
+                generation_kwargs["additional_modules"] = request_modules
             print(f"{TAG} stock Generate -> official Ideogram 4 pipeline (invisible takeover)")
             # ROUTING (audit R): the DETECTED format is the run-time authority -
             # refuse a confident non-in-process format with the documented fallback,
             # log the merge/loader policy line for everything else.
             try:
-                _enforce_loadable_policy(_current_ideogram_file())
+                _enforce_loadable_policy(request_ideogram_file(p))
             except ValueError:
                 raise
             except Exception as e:
@@ -709,7 +756,7 @@ def _wrapped_run(self, p, *args, **kwargs):
     parameter into a TypeError on every non-Ideogram generation - i.e. this
     extension breaking models it has nothing to do with.
     """
-    if is_ideogram4_selected():
+    if is_ideogram4_request(p):
         return _take_over(self, p)
     # stock behavior for every other checkpoint
     return _ORIGINAL_RUN(self, p, *args, **kwargs)
@@ -726,7 +773,7 @@ def _wrapped_process_images(p, *args, **kwargs):
 
     Every other checkpoint passes straight through untouched.
     """
-    if is_ideogram4_selected():
+    if is_ideogram4_request(p):
         print(f"{TAG} process_images() called directly (API or extension) -> "
               "official Ideogram 4 pipeline")
         # No ScriptRunner here, so no accordion values: _take_over falls back to
@@ -797,6 +844,15 @@ def install_wrapper():
     ScriptRunner.run = _wrapped_run
     ScriptRunner._i4_wrapped = True
     _install_process_images_guard()
+    from modules import script_callbacks
+    from .entrypoints import bind_api_entrypoint
+    def bind_api(*_args):
+        def route(original, p, *args, **kwargs):
+            if is_ideogram4_request(p):
+                return _take_over(getattr(p, 'scripts', None), p)
+            return original(p, *args, **kwargs)
+        bind_api_entrypoint(route)
+    script_callbacks.on_app_started(bind_api)
     from .lifecycle import install as install_lifecycle
     install_lifecycle(_PIPELINE_CACHE)
     print(f"{TAG} Invisible takeover installed: select an Ideogram 4 checkpoint in the normal "
