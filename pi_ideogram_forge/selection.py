@@ -79,6 +79,26 @@ def is_ideogram4_selected() -> bool:
     return _current_ideogram_file() is not None
 
 
+def request_ideogram_file(p=None) -> Path | None:
+    """Return the Ideogram checkpoint selected for this request.
+
+    API ``override_settings`` must win over the already-loaded UI checkpoint:
+    Forge applies those overrides only after this extension's routing guard.
+    """
+    overrides = getattr(p, "override_settings", None) or {}
+    if "sd_model_checkpoint" not in overrides:
+        return _current_ideogram_file()
+    ci = _resolve_ci_for_name(overrides.get("sd_model_checkpoint"))
+    if ci is None or not _ci_is_ideogram4(ci):
+        return None
+    filename = getattr(ci, "filename", None)
+    return Path(filename) if filename else None
+
+
+def is_ideogram4_request(p=None) -> bool:
+    return request_ideogram_file(p) is not None
+
+
 def _selected_checkpoint_name() -> str:
     """The checkpoint the UI currently points at (persisted across restarts)."""
     try:

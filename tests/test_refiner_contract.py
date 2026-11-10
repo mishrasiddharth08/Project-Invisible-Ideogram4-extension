@@ -66,7 +66,8 @@ class RefinerContractTests(unittest.TestCase):
 
     def test_refiner_failure_propagates_instead_of_error_image(self):
         namespace = {'TAG': '[test]', '_img2img_generation_kwargs': lambda p: {},
-                     '_enforce_loadable_policy': lambda path: None, '_current_ideogram_file': lambda: None,
+                     '_enforce_loadable_policy': lambda path: None, 'request_ideogram_file': lambda p: None,
+                     '_request_additional_modules': lambda p: None,
                      '_resolve_run_opts': lambda runner, p: {}, '_maybe_download_adapters': lambda opts: None,
                      '_resolve_seed': lambda p: None,
                      '_generate_with_oom_recovery': Mock(side_effect=RuntimeError('bad weights'))}
