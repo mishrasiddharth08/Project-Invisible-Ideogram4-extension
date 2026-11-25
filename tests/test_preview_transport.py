@@ -9,7 +9,7 @@ import time
 from PIL import Image
 from pydantic import BaseModel, Field
 
-from pi_ideogram_forge.preview import native_preview_session, publish_start, publish_final
+from pi_ideogram_forge.preview import publish_start, publish_final
 
 
 class Options:
@@ -39,18 +39,19 @@ def test_installed_forge_endpoint_sends_developing_and_exact_final_pixels():
     endpoint = ns['progressapi']
     publish_start(state, 512, 512)
     assert endpoint(request).live_preview is None
-    with native_preview_session(options):
-        first = endpoint(request)
-        assert first.live_preview.startswith('data:image/png;base64,')
-        request.id_live_preview = first.id_live_preview
-        assert endpoint(request).live_preview is None  # no duplicate frame
-        final = Image.new('RGB', (512, 512), '#238647')
-        publish_final(state, final, 4)
-        response = endpoint(request)
-        decoded = Image.open(io.BytesIO(base64.b64decode(response.live_preview.split(',')[1])))
-        assert decoded.size == final.size
-        assert decoded.tobytes() == final.tobytes()
-        assert response.progress == 1.0
-    assert not options.live_previews_enable
+    options.data['live_previews_enable'] = True
+    first = endpoint(request)
+    assert first.live_preview.startswith('data:image/png;base64,')
+    request.id_live_preview = first.id_live_preview
+    assert endpoint(request).live_preview is None  # no duplicate frame
+    final = Image.new('RGB', (512, 512), '#238647')
+    publish_final(state, final, 4)
+    response = endpoint(request)
+    decoded = Image.open(io.BytesIO(base64.b64decode(response.live_preview.split(',')[1])))
+    assert decoded.size == final.size
+    assert decoded.tobytes() == final.tobytes()
+    assert response.progress == 1.0
+    assert options.live_previews_enable
     assert options.show_progress_every_n_steps == -1
+    options.data['live_previews_enable'] = False
     assert endpoint(request).live_preview is None

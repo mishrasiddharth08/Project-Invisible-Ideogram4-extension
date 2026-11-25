@@ -537,24 +537,12 @@ def generate(
                  "is a DISTILLED recipe whose step count is baked into the "
                  "weights"
                  if _slider and _slider != num_steps else "")
-    # THE SAMPLER AND SCHEDULER DROPDOWNS DO NOT APPLY EITHER. Ideogram 4 is a
-    # flow-matching model integrated by this pipeline's own single-step Euler
-    # update (z = z + v * delta) on its own sigma schedule; nothing reads
-    # p.sampler_name or p.scheduler. A preset that stores "iPNDM / SGM
-    # Uniform" therefore changes nothing, and saying so beats letting someone
-    # tune a control that is not connected.
-    #
-    # It is also why the RES4LYF compatibility note about Spectrum does not
-    # bite here: that warning is about MULTISTEP samplers reusing previous-step
-    # model output on top of Spectrum's own caching. This integrator keeps no
-    # such history, so there is no double-approximation to compound.
     _samp = str(getattr(p, "sampler_name", "") or "")
     _sched = str(getattr(p, "scheduler", "") or "")
-    if _samp:
+    if opts.get('native_sampler'):
         _override += (f"\n{TAG}         note: sampler '{_samp}'"
                       + (f" / scheduler '{_sched}'" if _sched else "")
-                      + " is not used - Ideogram 4 has its own flow-matching "
-                        "integrator and sigma schedule")
+                      + " runs through Forge's installed native implementation")
     print(f"{TAG} prompt mode: {mode} | steps {num_steps} ({preset_name}) "
           f"| {width}x{height}{_override}")
 
@@ -768,6 +756,7 @@ def generate(
             want_uncond, turbo, debanner_on, debanner_str, mode, cond_path,
             turbo_merge_ok=turbo_merge_ok, distilled=distilled,
             native_spectrum=native_spectrum,
+            native_sampler=opts.get('native_sampler'),
             first_block_cache=0.08 if opts.get('first_block_cache_enabled', False) else 0.0,
             _FORGE_OK=_FORGE_OK, shared=shared, Processed=Processed, forge_images=forge_images,
             lora_logs=lora_logs, active_loras=active_loras,
@@ -783,7 +772,7 @@ def _run_sampling(
     p, pipe, caption_str, width, height, num_steps, guidance_schedule, mu, std,
     preset_name, quant_label, loras, r, bypass_lora_path, bypass_lora_strength,
     want_uncond, turbo, debanner_on, debanner_str, mode, cond_path,
-    *, turbo_merge_ok=False, distilled=False, native_spectrum=None, first_block_cache=0.0,
+    *, turbo_merge_ok=False, distilled=False, native_spectrum=None, native_sampler=None, first_block_cache=0.0,
     _FORGE_OK, shared, Processed, forge_images, lora_logs, active_loras,
     init_images=None, denoising_strength=0.75, resize_mode=0,
 ):
@@ -972,7 +961,7 @@ def _run_sampling(
         # call_queue.py already called shared.state.begin(); never call it again.
         shared.state.job_count = total
         shared.state.sampling_steps = actual_steps
-        shared.state.textinfo = f"Ideogram 4 | {preset_name} | {width}x{height}"
+        shared.state.textinfo = None
 
     # The peak-VRAM counter is CUMULATIVE SINCE PROCESS START unless it is
     # reset. Printing it next to "sampling + decode done" therefore reported
@@ -1037,17 +1026,26 @@ def _run_sampling(
             if interrupted:
                 break
             for b in range(batch_size):
+                if _FORGE_OK and (shared.state.interrupted or
+                                  getattr(shared.state, 'stopping_generation', False)):
+                    interrupted = True
+                    break
+                if _FORGE_OK and shared.state.skipped:
+                    shared.state.skipped = False
+                    continue
                 seed = base_seed + n * batch_size + b
                 output_index = n * batch_size + b
                 image_actual_steps = [actual_steps]
+                image_previews_on = False
                 if _FORGE_OK:
                     shared.state.job_no = n * batch_size + b
-                    if getattr(shared.opts, 'live_previews_enable', True):
+                    from .preview import preview_cadence
+                    image_previews_on = preview_cadence(shared.opts) not in (None, -1)
+                    if image_previews_on:
                         from .preview import publish_start
                         publish_start(shared.state, width, height)
                     shared.state.sampling_step = 0
-                    shared.state.textinfo = (
-                        f"Ideogram 4 | Image {output_index + 1}/{total} | Step 0/{actual_steps} | Preparing: gradient placeholder")
+                    shared.state.textinfo = None
 
                 # RESET THE PER-IMAGE BAR. It is created once, outside this
                 # loop, so without this its elapsed clock keeps running across
@@ -1080,10 +1078,8 @@ def _run_sampling(
                             pass
                     if _FORGE_OK:
                         shared.state.sampling_step = step + 1
-                        shared.state.textinfo = (
-                            f"Ideogram 4 | Image {output_index + 1}/{total} | "
-                            f"Step {step + 1}/{_total}")
-                        if shared.state.interrupted:
+                        shared.state.textinfo = None
+                        if shared.state.interrupted or shared.state.skipped:
                             raise InterruptedError()
 
                 def _on_actual_steps(actual):
@@ -1110,27 +1106,11 @@ def _run_sampling(
                 # PREVIEW CADENCE - Forge's own settings, which this ignored.
                 def _phase(name):
                     if _FORGE_OK:
-                        shared.state.textinfo = (
-                            f"Ideogram 4 | Image {output_index + 1}/{total} | "
-                            f"Step {shared.state.sampling_step}/{image_actual_steps[0]} | {name}")
+                        shared.state.textinfo = None
 
                 # Someone who turned live previews OFF still paid for them, and
                 # `actual_steps // 8` means EVERY step at 12 steps or fewer.
                 # Measured at 1280x1728: 35-39 s per generation, ~27% of the run.
-                _PREVIEW_EVERY = 1
-                _PREVIEW_ON = True
-                if _FORGE_OK:
-                    try:
-                        _PREVIEW_ON = bool(getattr(shared.opts, "live_previews_enable", True))
-                        _every = int(getattr(shared.opts, "show_progress_every_n_steps", 0) or 0)
-                        if _every < 0:
-                            _PREVIEW_ON = False   # -1 = only after the batch completes
-                        elif _every > 0:
-                            _PREVIEW_EVERY = _every
-                    except Exception:
-                        pass
-                if not _PREVIEW_ON:
-                    print(f"{TAG} live previews off (Forge setting) - skipping preview decodes")
                 # Our own counter, deliberately NOT shared.state.preview_step:
                 # that field is Forge's gate for its set_current_image() path
                 # and is reset at job boundaries, which would silently shift
@@ -1138,25 +1118,22 @@ def _run_sampling(
                 # directly, so we owe Forge nothing here but an id bump.
                 _preview_tick = [0]
                 _preview_warning = [False]
-                _preview_time = [0.0]
 
                 def _preview(z_latent):
-                    if not _FORGE_OK or not _PREVIEW_ON:
+                    if not _FORGE_OK:
+                        return
+                    every = preview_cadence(shared.opts)
+                    if every in (None, -1):
                         return
                     _preview_tick[0] += 1
-                    if _preview_tick[0] % _PREVIEW_EVERY != 0:
+                    if _preview_tick[0] % every != 0:
                         return
                     try:
-                        # Decode at most once a second, not a full VAE pass for
-                        # every fast step. Final decode below publishes exact
-                        # final pixels once, without a duplicate full-size pass.
+                        # Follow Forge's step cadence; final decode publishes
+                        # exact pixels without a duplicate preview decode.
                         _last = shared.state.sampling_step >= max(1, image_actual_steps[0])
                         if _last:
                             return
-                        _now = time.monotonic()
-                        if _now - _preview_time[0] < 1.0:
-                            return
-                        _preview_time[0] = _now
                         img = pipe.decode_preview(z_latent, preview_pixels=384)
                         if img is not None:
                             from .preview import publish_frame
@@ -1174,6 +1151,8 @@ def _run_sampling(
                         gray_steps.begin()
                         first_step_undo = gray_steps.finish
                     pipeline_kwargs = {}
+                    if native_sampler is not None:
+                        pipeline_kwargs['sampler_request'] = native_sampler
                     if is_img2img:
                         source = init_images[output_index % len(init_images)]
                         pipeline_kwargs.update(
@@ -1186,7 +1165,7 @@ def _run_sampling(
                         caption_str, height=height, width=width, num_steps=num_steps,
                         guidance_schedule=guidance_schedule, mu=mu, std=std, seed=seed,
                         raise_on_caption_issues=False, step_callback=cb,
-                        preview_callback=_preview,
+                        preview_callback=_preview if image_previews_on else None,
                         phase_callback=_phase,
                         on_actual_steps=_on_actual_steps,
                         filter_bypass=r["enabled"],
@@ -1199,6 +1178,9 @@ def _run_sampling(
                         **pipeline_kwargs,
                     )
                 except InterruptedError:
+                    if _FORGE_OK and shared.state.skipped and not shared.state.interrupted:
+                        shared.state.skipped = False
+                        continue
                     interrupted = True
                     break
                 finally:
@@ -1212,7 +1194,8 @@ def _run_sampling(
                         first_step_undo = None
                 if _FORGE_OK and imgs:
                     from .preview import publish_final
-                    publish_final(shared.state, imgs[-1], image_actual_steps[0])
+                    if preview_cadence(shared.opts) is not None:
+                        publish_final(shared.state, imgs[-1], image_actual_steps[0])
                 all_images.extend(imgs)
                 all_seeds.append(seed)
                 all_prompts.append(str(p.prompt))
@@ -1223,12 +1206,19 @@ def _run_sampling(
                     f"Steps: {used_steps} ({preset_name}{bypass_note}) | "
                     f"CFG schedule: main {gw_main:g}, tail {gw_tail:g}\n"
                     f"Size: {width}x{height} | Seed: {seed}\n"
-                    f"Sampler: euler + Ideogram4Scheduler (logit-normal, mu={mu}, std={std})\n"
-                    f"VAE: flux2-vae | TE: qwen3vl_8b 13-layer tap | Prompt mode: {mode}"
+                    + (f"Sampler: {native_sampler['sampler_name']}, Schedule type: {native_sampler['scheduler_name']}\n"
+                     if native_sampler is not None else
+                     f"Sampler: euler + Ideogram4Scheduler (logit-normal, mu={mu}, std={std})\n")
+                    + f"VAE: flux2-vae | TE: qwen3vl_8b 13-layer tap | Prompt mode: {mode}"
                     + (f"\nMode: img2img | Denoising strength: {denoising_strength:g} | "
                        f"Resize mode: {resize_mode}" if is_img2img else "")
                     + (f"\nLoRAs: {', '.join(n for n, _s, _p in loras)}" if loras else "")
                 )
+                if native_sampler is not None:
+                    adjustment = native_sampler.get('options', {}).get('schedule_adjustment')
+                    if adjustment:
+                        info += f'\nSchedule adjustment: {adjustment}'
+                getattr(p, 'extra_generation_params', {}).pop('Spectrum notice', None)
                 if native_spectrum is not None:
                     stats = getattr(pipe, '_native_spectrum_stats', None) or {}
                     info += (f"\nSpectrum: Forge built-in | "
@@ -1236,8 +1226,13 @@ def _run_sampling(
                              f"forecast branch calls: {stats.get('forecast_calls', 0)}")
                     info += '\nSpectrum: Forge built-in, ' + ', '.join(
                         f'spec_{key}: {value}' for key, value in native_spectrum.items())
+                    notice = stats.get('notice')
+                    if notice:
+                        info += f'\nSpectrum notice: {notice}'
                     try:
                         p.extra_generation_params['Spectrum'] = 'Forge built-in'
+                        if notice:
+                            p.extra_generation_params['Spectrum notice'] = notice
                         for key, value in native_spectrum.items():
                             p.extra_generation_params['spec_' + key] = value
                     except Exception:
@@ -1342,7 +1337,7 @@ def _run_sampling(
         print(f"{TAG} {line}")
 
     if _FORGE_OK:
-        return Processed(p, all_images, seed=base_seed,
+        return Processed(p, all_images, seed=all_seeds[0] if all_seeds else base_seed,
                          info=all_infotexts[0] if all_infotexts else "",
                          all_prompts=all_prompts, all_seeds=all_seeds,
                          infotexts=all_infotexts)

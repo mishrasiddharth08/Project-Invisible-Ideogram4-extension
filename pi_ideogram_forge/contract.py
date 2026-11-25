@@ -4,10 +4,15 @@ CAPABILITIES = {
     'route': 'version-bound Forge compatibility adapter',
     'tasks': ('txt2img', 'experimental-img2img'),
     'representation': '32-channel Flux2 latents, 2x2 packed to 128 channels',
-    'prediction': 'flow velocity; Euler with Ideogram logit-normal schedule',
+    'prediction': 'flow velocity; native Forge sampler/scheduler handoff',
     'unsupported': ('inpainting', 'outpainting', 'reference editing', 'hires fix',
                     'negative text conditioning', 'variation seeds', 'prompt arrays'),
 }
+
+
+def normalize_ui_sampler(p):
+    """Compatibility no-op: sampler and scheduler intent must pass through."""
+    return None
 
 
 def validate_request(p):
@@ -21,9 +26,6 @@ def validate_request(p):
         raise ValueError('Native Hires fix is unsupported by this Ideogram compatibility route.')
     if float(getattr(p, 'subseed_strength', 0) or 0) != 0:
         raise ValueError('Variation seeds are unsupported by this Ideogram compatibility route.')
-    sampler = str(getattr(p, 'sampler_name', '') or '').strip()
-    if sampler and sampler.lower() != 'euler':
-        raise ValueError('Ideogram currently supports Euler only. Select Euler in the native sampler control.')
     for name in ('width', 'height'):
         value = int(getattr(p, name, 1024))
         if not 256 <= value <= 2048 or value % 16:

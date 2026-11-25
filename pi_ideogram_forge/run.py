@@ -672,9 +672,7 @@ def _take_over(runner, p):
         lifecycle.release_changed(_PIPELINE_CACHE, shared.opts.sd_model_checkpoint)
         lifecycle.selection = shared.opts.sd_model_checkpoint
         try:
-            from .preview import native_preview_session
-            with native_preview_session(shared.opts):
-                return _take_over_locked(runner, p)
+            return _take_over_locked(runner, p)
         finally:
             lifecycle.release_changed(_PIPELINE_CACHE, shared.opts.sd_model_checkpoint)
 
@@ -694,6 +692,8 @@ def _take_over_locked(runner, p):
         try:
             from pi_ideogram_forge.contract import validate_request, validate_native_spectrum
             validate_request(p)
+            from pi_ideogram_lib.native_sampling import resolve_request
+            native_sampler = resolve_request(p)
             native_spectrum = validate_native_spectrum(runner, p)
             generation_kwargs = _img2img_generation_kwargs(p)
             generation_kwargs["selected_path"] = request_ideogram_file(p)
@@ -715,6 +715,7 @@ def _take_over_locked(runner, p):
             # Resolve the accordion values -> run settings (single owner: settings.py)
             opts = _resolve_run_opts(runner, p)
             opts['native_spectrum'] = native_spectrum
+            opts['native_sampler'] = native_sampler
             if getattr(p, '_pi_refining', False):
                 from pi_ideogram_lib.refiner import neutral_options
                 opts = neutral_options(opts)

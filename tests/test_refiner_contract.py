@@ -67,13 +67,13 @@ class RefinerContractTests(unittest.TestCase):
     def test_refiner_failure_propagates_instead_of_error_image(self):
         namespace = {'TAG': '[test]', '_img2img_generation_kwargs': lambda p: {},
                      '_enforce_loadable_policy': lambda path: None, 'request_ideogram_file': lambda p: None,
-                     '_request_additional_modules': lambda p: None,
                      '_resolve_run_opts': lambda runner, p: {}, '_maybe_download_adapters': lambda opts: None,
-                     '_resolve_seed': lambda p: None,
+                     '_resolve_seed': lambda p: None, '_request_additional_modules': lambda p: [],
                      '_generate_with_oom_recovery': Mock(side_effect=RuntimeError('bad weights'))}
         functions('pi_ideogram_forge/run.py', ['_take_over_locked'], namespace)
         p = SimpleNamespace(_pi_refining=True, width=512, height=512, batch_size=1)
-        with self.assertRaisesRegex(RuntimeError, 'bad weights'):
+        with patch('pi_ideogram_lib.native_sampling.resolve_request', return_value={}), \
+             self.assertRaisesRegex(RuntimeError, 'bad weights'):
             namespace['_take_over_locked'](None, p)
 
     def test_refiner_oom_is_one_attempt_without_resize(self):

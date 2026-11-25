@@ -173,6 +173,11 @@ def find_text_encoder(search_dirs: list[str | Path]) -> Path | None:
       name = cand.stem.lower()
       if not any(p in name for p in TE_NAME_PATTERNS):
         continue
+      try:
+        if not _looks_like_qwen3vl_te(read_safetensors_header(cand)):
+          continue
+      except Exception:
+        continue
       # rank: fp8_scaled > bf16 > anything else (prefer smaller/faster when equal)
       rank = 0
       if "fp8" in name:
@@ -227,6 +232,58 @@ QWEN3VL_8B_HIDDEN = 4096      # the 32B is 5120
 FLUX2_VAE_Z_CHANNELS = 32     # Flux1's ae.safetensors is 16
 
 
+def _contradicts_qwen3vl(metadata: dict) -> bool:
+  """Reject known architecture conflicts; absent/broken exporter tags prove nothing."""
+  if not isinstance(metadata, dict):
+    return False
+  architecture_fields = {"model_type", "architecture", "architectures",
+                         "modelspec.architecture", "general.architecture"}
+  containers = {"config", "config.json", "model_config", "text_config"}
+  foreign = {"qwen2", "qwen2vl", "qwen25vl", "qwen3", "qwen3moe",
+             "qwen35", "qwen35moe", "llama", "mistral", "gemma", "gemma2",
+             "gemma3", "phi3", "phi4", "deepseek", "deepseekv2", "deepseekv3"}
+  for key, value in metadata.items():
+    if key in containers:
+      try:
+        nested = json.loads(value) if isinstance(value, str) else value
+        if _contradicts_qwen3vl(nested):
+          return True
+      except (ValueError, TypeError):
+        pass
+    if key not in architecture_fields:
+      continue
+    try:
+      value = json.loads(value) if isinstance(value, str) and value.startswith("[") else value
+    except ValueError:
+      continue
+    for item in value if isinstance(value, list) else [value]:
+      tag = re.sub(r"[^a-z0-9]", "", str(item).lower())
+      for suffix in ("forconditionalgeneration", "forcausallm", "textmodel", "model"):
+        if tag.endswith(suffix):
+          tag = tag[:-len(suffix)]
+          break
+      if tag in foreign:
+        return True
+  return False
+
+
+def _has_language_depth(header: dict, converted: bool) -> bool:
+  from .constants import QWEN3_VL_ACTIVATION_LAYERS
+
+  attention, feed_forward = set(), set()
+  pattern = (r"^blk\.(\d+)\.(attn_(?:q|k|v|qkv|output)|ffn_(?:gate|up|down))\.(?:weight|qweight)$"
+             if converted else
+             r"^(?:model|language_model|model\.language_model)\.layers\.(\d+)\."
+             r"(self_attn\.(?:q_proj|k_proj|v_proj|qkv_proj|o_proj)|mlp\.(?:gate_proj|up_proj|down_proj))\.(?:weight|qweight)$")
+  for key, tensor in header.items():
+    match = re.match(pattern, key)
+    if match and isinstance(tensor, dict) and tensor.get("shape"):
+      layer, module = int(match[1]), match[2]
+      (attention if module.startswith(("attn_", "self_attn.")) else feed_forward).add(layer)
+  needed = set(range(max(QWEN3_VL_ACTIVATION_LAYERS) + 1))
+  return needed <= attention and needed <= feed_forward
+
+
 def _looks_like_qwen3vl_te(header: dict) -> bool:
   """Qwen3-VL-8B at the width Ideogram 4 taps (hidden 4096).
 
@@ -240,17 +297,22 @@ def _looks_like_qwen3vl_te(header: dict) -> bool:
     with "is NOT Qwen3-VL-8B" when it was precisely that; the vision tower is
     irrelevant here anyway, since Ideogram 4 taps only the language model.
   """
+  if _contradicts_qwen3vl(header.get("__metadata__") or {}):
+    return False
   keys = _key_set(header)
   if "token_embd.weight" in keys or any(k.startswith("blk.") for k in keys):
     emb = _shape(header, "token_embd.weight")
-    # llama.cpp stores this already in torch order (vocab, hidden).
-    return bool(emb and len(emb) == 2 and emb[1] == QWEN3VL_8B_HIDDEN)
-  has_lm = any(k.startswith(("model.layers.", "language_model.layers.")) for k in keys)
+    # llama.cpp stores this in torch order (vocab, hidden). The embedding
+    # alone says nothing about whether the required language layers exist.
+    return bool(emb and len(emb) == 2 and emb[1] == QWEN3VL_8B_HIDDEN
+                and _has_language_depth(header, converted=True))
+  has_lm = any(k.startswith(("model.layers.", "language_model.layers.", "model.language_model.layers.")) for k in keys)
   has_vis = any("deepstack_merger" in k or k.startswith(("visual.", "model.visual.")) for k in keys)
   if not (has_lm and has_vis):
     return False
   emb = _shape(header, "embed_tokens.weight")
-  return bool(emb and len(emb) == 2 and emb[1] == QWEN3VL_8B_HIDDEN)
+  return bool(emb and len(emb) == 2 and emb[1] == QWEN3VL_8B_HIDDEN
+              and _has_language_depth(header, converted=False))
 
 
 def _looks_like_flux2_vae(header: dict) -> bool:
@@ -367,6 +429,8 @@ def _te_dir_ok(folder) -> bool:
   if cfg.is_file():
     try:
       conf = json.loads(cfg.read_text(encoding="utf-8")) or {}
+      if _contradicts_qwen3vl(conf):
+        return False
       text = conf.get("text_config") or conf
       hidden = int(text.get("hidden_size", 0) or 0)
       layers = int(text.get("num_hidden_layers", 0) or 0)

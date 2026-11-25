@@ -138,19 +138,49 @@ def _is_complete_safetensors(path: Path) -> bool:
             if len(raw) < 8:
                 return False
             header_len = struct.unpack("<Q", raw)[0]
-            if header_len <= 0 or 8 + header_len > size:
+            if header_len <= 0 or header_len > 100_000_000 or 8 + header_len > size:
                 return False
             header = json.loads(f.read(header_len))
         # The header declares where every tensor ends. A download cut short has
         # a valid header and a short body, so the size check is what catches it.
-        end = 0
+        if not isinstance(header, dict):
+            return False
+        spans = []
         for name, meta in header.items():
-            if name == "__metadata__" or not isinstance(meta, dict):
+            if name == "__metadata__":
+                if not isinstance(meta, dict) or not all(isinstance(v, str) for v in meta.values()):
+                    return False
                 continue
+            if not isinstance(meta, dict):
+                return False
             offsets = meta.get("data_offsets")
-            if isinstance(offsets, (list, tuple)) and len(offsets) == 2:
-                end = max(end, int(offsets[1]))
-        return 8 + header_len + end <= size
+            shape = meta.get("shape")
+            bits = {"BOOL": 8, "U8": 8, "I8": 8, "I16": 16, "U16": 16,
+                    "I32": 32, "U32": 32, "I64": 64, "U64": 64,
+                    "F16": 16, "BF16": 16, "F32": 32, "F64": 64,
+                    "F8_E4M3": 8, "F8_E5M2": 8, "F8_E8M0": 8,
+                    "F4": 4, "F6_E2M3": 6, "F6_E3M2": 6}
+            width = bits.get(meta.get("dtype"))
+            if (not isinstance(offsets, list) or len(offsets) != 2
+                    or not all(type(v) is int for v in offsets)
+                    or not isinstance(shape, list)
+                    or not all(type(v) is int and v >= 0 for v in shape) or width is None):
+                return False
+            count = 1
+            for dim in shape:
+                count *= dim
+            start, end = offsets
+            if start < 0 or end < start or (end - start) * 8 != count * width:
+                return False
+            spans.append((start, end))
+        if not spans:
+            return False
+        end = 0
+        for start, stop in sorted(spans):
+            if start != end:
+                return False
+            end = stop
+        return 8 + header_len + end == size
     except Exception:
         return False
 
@@ -164,8 +194,41 @@ def _on_disk(filename: str, models_dirs) -> Path | None:
                     print(f"[Invisible-I4] {cand.name} is present but truncated/incomplete "
                           "- ignoring it so it can be fetched again")
                     continue
+                if not _is_expected_adapter(cand, filename):
+                    continue
                 return cand
     return None
+
+
+def _is_expected_adapter(path: Path, filename: str) -> bool:
+    """Require native adapter weight pairs, not just a familiar filename."""
+    try:
+        import re
+        from pi_ideogram_lib.detect import read_safetensors_header
+        from pi_ideogram_lora.ideogram4_lora import (
+            classify_adapter, _normalize_key, _IDEOGRAM4_KEY_PATTERNS,
+        )
+        expected = {HF_TURBOTIME[1]: "turbo_time", HF_UNCOND[1]: "uncond_replacement",
+                    CIVITAI_GRAY[1]: "gray_bypass"}.get(filename)
+        if expected is None or classify_adapter(path).get("kind") != expected:
+            return False
+        groups = {}
+        for key in read_safetensors_header(path):
+            normalized = _normalize_key(key)
+            if normalized is None:
+                continue
+            module, side = normalized
+            if any(re.match(pattern, module + ".") for pattern in _IDEOGRAM4_KEY_PATTERNS):
+                groups.setdefault(module, set()).add(side)
+        for sides in groups.values():
+            if {"A", "B"} <= sides:
+                return True
+            if (("W1" in sides or {"W1A", "W1B"} <= sides)
+                    and ("W2" in sides or {"W2A", "W2B"} <= sides)):
+                return True
+        return False
+    except Exception:
+        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -470,12 +533,22 @@ def _dest_dir_for(models_dirs, asset: str) -> Path:
     return adapter_dest(models_dirs)
 
 
-def _find_named(basename: str, dirs) -> Path | None:
-    for d in dirs or []:
-        for cand in Path(d).rglob("*.safetensors"):
-            if cand.name == basename or cand.stem.lower() == Path(basename).stem.lower():
-                return cand
-    return None
+def _complete_encoder_directory(path: Path) -> bool:
+    """Preserve supported HF encoder overrides while rejecting missing shards."""
+    from pi_ideogram_lib.detect import _te_dir_ok, te_shard_files
+
+    try:
+        if not _te_dir_ok(path):
+            return False
+        index = path / "model.safetensors.index.json"
+        if index.is_file():
+            names = set(json.loads(index.read_text(encoding="utf-8"))["weight_map"].values())
+            if not names or not all((path / name).is_file() for name in names):
+                return False
+        shards = te_shard_files(path)
+        return bool(shards) and all(_is_complete_safetensors(p) for p in shards)
+    except Exception:
+        return False
 
 
 def _asset_present(asset: str, quant: str, models_dirs) -> Path | None:
@@ -485,41 +558,62 @@ def _asset_present(asset: str, quant: str, models_dirs) -> Path | None:
         from pi_ideogram_lib.detect import model_search_dirs, te_vae_search_dirs
     except Exception:
         return None
-    if asset == "checkpoint:cond":
-        source = _asset_source(asset, quant)
-        if source:
-            found = _find_named(Path(source[1]).name, model_search_dirs(models_dirs))
-            if found:
-                return found
-        # accept any Ideogram4 file whose name carries this quant token
-        q = quant
-        for d in model_search_dirs(models_dirs):
-            for cand in Path(d).rglob("*.safetensors"):
-                low = cand.stem.lower()
-                if "uncond" in low:
-                    continue
-                tok = low.replace("ideogram", "").replace("ideogram4", "").replace("_", "").replace("-", "")
-                if q.replace("_", "") in tok and q.split("_")[0] in low:
-                    return cand
-        return None
-    if asset == "checkpoint:uncond":
-        source = _asset_source(asset, quant)
-        if source:
-            found = _find_named(Path(source[1]).name, model_search_dirs(models_dirs))
-            if found:
-                return found
+    if asset in ("checkpoint:cond", "checkpoint:uncond"):
+        from pi_ideogram_lib.detect import list_ideogram4_checkpoints, is_unconditional_file
+        from pi_ideogram_lib.quant_registry import sniff_quant
+
+        want_uncond = asset == "checkpoint:uncond"
+        for cand in list_ideogram4_checkpoints(model_search_dirs(models_dirs)):
+            if (not _is_complete_safetensors(cand)
+                    or is_unconditional_file(cand) != want_uncond):
+                continue
+            if sniff_quant(cand).get("id") == quant:
+                return cand
+        if not want_uncond:
+            return None
         # Ostris uncond LoRA replaces the second transformer - accept it too
         try:
             found = _on_disk(HF_UNCOND[1], models_dirs)
         except Exception:
             found = None
         return found
-    if asset == "te":
-        from pi_ideogram_lib.detect import find_text_encoder
-        return find_text_encoder(te_vae_search_dirs(models_dirs))
-    if asset == "vae":
-        from pi_ideogram_lib.detect import find_vae
-        return find_vae(te_vae_search_dirs(models_dirs))
+    if asset in ("te", "vae"):
+        from pi_ideogram_lib.detect import (
+            read_safetensors_header, _looks_like_qwen3vl_te, _looks_like_flux2_vae,
+            forge_selected_modules,
+        )
+        predicate = _looks_like_qwen3vl_te if asset == "te" else _looks_like_flux2_vae
+        preferred = []
+        if asset == "te":
+            try:
+                from pi_ideogram_lib import config
+                override = str(config.get("text_encoder_override", "") or "").strip()
+                if override:
+                    preferred.append(Path(override))
+            except Exception:
+                pass
+        preferred.extend(forge_selected_modules())
+        for cand in preferred:
+            if asset == "te" and cand.is_dir() and _complete_encoder_directory(cand):
+                return cand
+            try:
+                if _is_complete_safetensors(cand) and predicate(read_safetensors_header(cand)):
+                    return cand
+            except Exception:
+                continue
+        candidates = []
+        for directory in te_vae_search_dirs(models_dirs):
+            for cand in Path(directory).rglob("*.safetensors"):
+                if not _is_complete_safetensors(cand):
+                    continue
+                try:
+                    if predicate(read_safetensors_header(cand)):
+                        candidates.append(cand)
+                except Exception:
+                    continue
+        # Keep the detector's preference for FP8 text encoders.
+        return next((p for p in candidates if asset == "te" and "fp8" in p.stem.lower()),
+                    candidates[0] if candidates else None)
     if asset == "adapter:turbotime":
         return _on_disk(HF_TURBOTIME[1], models_dirs)
     if asset == "adapter:uncond":
@@ -546,8 +640,8 @@ def assets_status(models_dirs, quant_id: str) -> list[dict]:
         if source is None:
             note = _manual_source_note(quant_id)
             rows.append({
-                "id": asset, "label": ASSET_LABELS[asset], "present": False,
-                "path": None, "in_progress": asset in ACTIVE, "actionable": False,
+                "id": asset, "label": ASSET_LABELS[asset], "present": path is not None,
+                "path": str(path) if path else None, "in_progress": asset in ACTIVE, "actionable": False,
                 "note": note,
             })
             continue
@@ -588,16 +682,16 @@ def fetch_asset(asset: str, quant_id: str, models_dirs, *, progress_cb=None) -> 
         kind = asset.split(":", 1)[1]
         result = download_adapter(kind, models_dirs, progress_cb=progress_cb)
         return result
+    present = _asset_present(asset, quant_id, models_dirs)
+    if present is not None:
+        _status(progress_cb, f"{ASSET_LABELS.get(asset, asset)} already present ({present}) - nothing to do")
+        return None
     source = _asset_source(asset, quant_id)
     if source is None:
         raise AdapterMissing(
             f"{ASSET_LABELS.get(asset, asset)} for '{quant_id}': " + _manual_source_note(quant_id)
             + " Nothing was changed."
         )
-    present = _asset_present(asset, quant_id, models_dirs)
-    if present is not None:
-        _status(progress_cb, f"{ASSET_LABELS.get(asset, asset)} already present ({present}) - nothing to do")
-        return None
     repo, repo_path = source
     dest_dir = _dest_dir_for(models_dirs, asset)
     basename = Path(repo_path).name

@@ -640,6 +640,7 @@ class Ideogram4Pipeline:
     debanner_strength: float = 0.6,
     spectrum=None,
     native_spectrum=None,
+    sampler_request=None,
     first_block_cache: float = 0.0,
     init_image: Image.Image | None = None,
     strength: float = 1.0,
@@ -668,7 +669,8 @@ class Ideogram4Pipeline:
         (P2); used when bypass_extra_steps is 0.
       first_step_undo: Callable invoked ONCE right after the first step's
         forwards (before any offload), so first-step-only adapters (gray
-        bypass LoRA) can be removed from the live weights in time.
+        bypass LoRA) can be removed from the live weights in time. Native
+        multistage solvers remove it after the first guided evaluation.
       debanner_enabled: If True, apply MrJackSpade correction tensor
         on the first step to remove the Ideogram watermark.
       debanner_strength: Correction magnitude (0.0–1.5, default 0.6).
@@ -747,6 +749,16 @@ class Ideogram4Pipeline:
         raise ValueError(f"guidance_schedule must have shape ({num_steps},)")
     else:
       gw_per_step = torch.full((num_steps,), float(guidance_scale), dtype=torch.float32, device=self.device)
+
+    native_steps = num_steps
+    if sampler_request is not None:
+      from .native_sampling import build_sigmas
+      flow_times = schedule(step_intervals.flip(0)).float().clamp(min=1e-5, max=1.)
+      official_sigmas = (1. - flow_times) / flow_times
+      official_sigmas[-1] = 0.
+      sigmas = build_sigmas(sampler_request, official_sigmas,
+                            width=width, height=height, device=self.device)
+      native_steps = len(sigmas) - 1
 
     # SPEED + VRAM: identical prompts + size reuses packed inputs and features.
     # Store only TEXT features in bf16, not thousands of zero image slots.
@@ -883,15 +895,23 @@ class Ideogram4Pipeline:
     self.memory.ensure_cond_on_gpu()
 
     if on_actual_steps is not None:
-      on_actual_steps(num_steps)
+      on_actual_steps(native_steps)
 
     # Prompt projection is independent of timestep. Reuse it within this image;
     # temporary first-step adapters invalidate it immediately after removal.
     text_projection_cache = {}
     native = None
-    if native_spectrum is not None:
+    spectrum_requested = native_spectrum is not None
+    supported_history = sampler_request is None or sampler_request.get('function_name') in {
+      'sample_euler', 'sample_euler_ancestral', 'sample_ipndm'}
+    direct_calls = 0
+    spectrum_notice = None
+    if spectrum_requested and not supported_history:
+      spectrum_notice = "No model calls skipped. This sampler requires exact evaluations."
+      print(f"[Invisible-I4] Spectrum: {spectrum_notice}")
+    if spectrum_requested and supported_history:
       from .native_spectrum import ForgeSpectrum
-      native = ForgeSpectrum(num_steps, self.device, native_spectrum,
+      native = ForgeSpectrum(native_steps, self.device, native_spectrum,
                              model=self.conditional_transformer)
       print("[Invisible-I4] Spectrum: Forge built-in SpectrumNode.patch")
 
@@ -974,7 +994,73 @@ class Ideogram4Pipeline:
     try:
       if phase_callback is not None:
         phase_callback('Sampling')
-      for i in range(num_steps - 1, -1, -1):
+      if sampler_request is not None:
+        from .native_sampling import run_sampler
+        # Native k-diffusion solvers integrate y=data+sigma*noise. Ideogram
+        # integrates x=t*data+(1-t)*noise: y=x/t, sigma=(1-t)/t.
+        initial_t = 1. / (1. + sigmas[0])
+        y = z_image + noise * sigmas[0] if partial_img2img else z / initial_t
+        # Native image samplers expect BCHW, while Ideogram packs image tokens.
+        # This is a reversible layout change, not another VAE conversion.
+        y = y.transpose(1, 2).reshape(batch_size, latent_dim, grid_h, grid_w)
+        callback_index = [0]
+        last_evaluation = [None]
+        def denoise_ve(image_y, sigma, **unused):
+          nonlocal z, t, t_val, _step_idx, use_debanner, first_step_undo, direct_calls
+          sigma_value = float(sigma.flatten()[0])
+          t_val = 1. / (1. + sigma_value)
+          if filter_bypass and not partial_img2img and last_evaluation[0] is None:
+            t_val += .005
+          t = torch.full((batch_size,), t_val, device=self.device, dtype=torch.float32)
+          # Coordinate scaling uses the actual solver time, not the optional
+          # first-evaluation model-time offset.
+          z = image_y.flatten(2).transpose(1, 2) / (1. + sigma_value)
+          _step_idx = min(callback_index[0], native_steps - 1)
+          set_step(_step_idx, native_steps)
+          guidance_index = int(torch.argmin((flow_times[:-1] - t_val).abs()))
+          gw_i = float(gw_per_step[num_steps - 1 - guidance_index])
+          use_debanner = bool(debanner_dirs) and _step_idx == native_steps - 1 - debanner_step
+          # Multistage/repeated evaluations must not reuse a forecast history
+          # made for a different solver stage or trajectory.
+          previous = last_evaluation[0]
+          if native is not None and (use_debanner or t_val >= .999 or
+              previous is not None and (previous[0] == _step_idx or sigma_value >= previous[1])):
+            native.reset()
+          indices = torch.arange(batch_size, device=self.device)
+          pos_v = native_velocity(0, forward_cond) if native is not None else forward_cond(z, t, indices)
+          if gw_i != 1.:
+            neg_v = native_velocity(1, forward_uncond) if native is not None else forward_uncond(z, t, indices)
+            velocity = gw_i * pos_v + (1. - gw_i) * neg_v
+          else:
+            velocity = pos_v
+          if spectrum_notice:
+            direct_calls += 1 + int(gw_i != 1.)
+          endpoint = z + (1. - t_val) * velocity
+          if first_step_undo is not None:
+            first_step_undo()
+            first_step_undo = None
+            text_projection_cache.clear()
+            if native is not None:
+              native.reset()
+          if has_uncond and gw_i != 1. and not high_vram:
+            self.memory.offload_uncond()
+          last_evaluation[0] = (_step_idx, sigma_value)
+          return endpoint.transpose(1, 2).reshape_as(image_y)
+
+        def native_callback(info):
+          index = int(info.get('i', callback_index[0]))
+          if step_callback is not None:
+            step_callback(index, native_steps)
+          if preview_callback is not None and info.get('denoised') is not None:
+            started = _time.perf_counter()
+            preview_callback(info['denoised'].flatten(2).transpose(1, 2))
+            _ph['preview'] += (_time.perf_counter() - started) * 1000.
+          callback_index[0] = index + 1
+
+        z = run_sampler(sampler_request, denoise_ve, y, sigmas,
+                        callback=native_callback, seed=seed)
+        z = z.flatten(2).transpose(1, 2)
+      for i in (range(num_steps - 1, -1, -1) if sampler_request is None else ()):
         t_val = float(schedule(step_intervals[i + 1].unsqueeze(0)).item())
         s_val = float(schedule(step_intervals[i].unsqueeze(0)).item())
         # BYPASS: shift first sigma up by +0.005 to bypass the model's baked-in safety filter
@@ -1037,14 +1123,21 @@ class Ideogram4Pipeline:
           _ph["preview"] += (_time.perf_counter() - _t_pv) * 1000.0
     finally:
       if native is not None:
+        if not native.forecast_calls:
+          spectrum_notice = "No model calls skipped during this sampling pass."
+          print(f"[Invisible-I4] Spectrum: {spectrum_notice}")
         self._native_spectrum_stats = dict(
           implementation="Forge built-in", real_calls=native.real_calls,
           forecast_calls=native.forecast_calls, real_items=native.real_items,
-          forecast_items=native.forecast_items)
+          forecast_items=native.forecast_items, notice=spectrum_notice)
         print(f"[Invisible-I4] Forge Spectrum: {native.real_calls} real branch calls, "
               f"{native.forecast_calls} forecast branch calls")
         native.close()
         native = None
+      elif spectrum_notice:
+        self._native_spectrum_stats = dict(
+          implementation="Forge built-in", real_calls=direct_calls, forecast_calls=0,
+          real_items=direct_calls * batch_size, forecast_items=0, notice=spectrum_notice)
 
     _ph["steps"] += (_time.perf_counter() - _t_steps) * 1000.0
     # MEMORY: reload VAE for decode (offloaded on both paths before sampling)

@@ -8,7 +8,8 @@ from pi_ideogram_forge.contract import validate_request, validate_native_spectru
 
 
 def request(**values):
-    defaults = dict(prompt='scene', negative_prompt='', sampler_name='Euler',
+    defaults = dict(prompt='scene', negative_prompt='', sampler_name='iPNDM',
+                    scheduler='Karras',
                     width=512, height=512, subseed_strength=0, enable_hr=False)
     defaults.update(values)
     return SimpleNamespace(**defaults)
@@ -16,7 +17,7 @@ def request(**values):
 
 @pytest.mark.parametrize('changes', [dict(prompt=['one', 'two']), dict(seed=[1, 2]),
     dict(negative_prompt='blur'), dict(enable_hr=True), dict(subseed_strength=.2),
-    dict(sampler_name='DPM++ 2M'), dict(width=513), dict(height=4096)])
+    dict(width=513), dict(height=4096)])
 def test_unsupported_request_fails_before_loading(changes):
     with pytest.raises(ValueError):
         validate_request(request(**changes))
@@ -25,6 +26,12 @@ def test_unsupported_request_fails_before_loading(changes):
 def test_native_txt2img_and_img2img_inputs_are_accepted():
     validate_request(request())
     validate_request(request(init_images=[object()], denoising_strength=.5))
+
+
+def test_sampler_and_scheduler_names_are_left_for_native_preflight():
+    p = request(sampler_name='DPM++ 3M SDE', scheduler='Beta')
+    validate_request(p)
+    assert p.sampler_name == 'DPM++ 3M SDE' and p.scheduler == 'Beta'
 
 
 def test_builtin_spectrum_settings_reach_the_request():
